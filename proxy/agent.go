@@ -187,7 +187,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 	// llama.cpp re-encodes the system prompt from scratch (~1-2s on a
 	// warm GPU); the per-turn cache benefit within the session is preserved.
 	// Disable with ATLAS_FRESH_SLOT_PER_SESSION=0.
-	if envOr("ATLAS_FRESH_SLOT_PER_SESSION", "1") != "0" {
+	if envOr("ATLAS_FRESH_SLOT_PER_SESSION", "1") != "0" && !ctx.DisableFreshSlot {
 		eraseLlamaSlot(ctx)
 	}
 
@@ -1862,6 +1862,10 @@ func handleAgent(w http.ResponseWriter, r *http.Request) {
 		Mode       string       `json:"mode"`       // "default", "accept-edits", "yolo"
 		SessionID  string       `json:"session_id"` // optional — required for /cancel
 		History    []historyMsg `json:"history,omitempty"`
+		// /demo split-pane flags — tags match tui/chat.go's agentRequest.
+		BypassV3         bool   `json:"bypass_v3,omitempty"`          // raw pane: short-circuit V3 calls
+		DisableFreshSlot bool   `json:"disable_fresh_slot,omitempty"` // keep the pre-warmed KV prefix
+		SandboxSubdir    string `json:"sandbox_subdir,omitempty"`     // confine writes to this workspace subdir
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -1887,11 +1891,26 @@ func handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	workingDir := envOr("ATLAS_WORKSPACE_DIR", hostDir)
 
+	// /demo: each pane works inside its own workspace subdir so the two
+	// concurrent sessions can't clobber each other's files and the TUI's
+	// post-run review finds each side's output where it expects it. The
+	// subdir is a bare name (no separators, no traversal) or it's ignored.
+	if sub := filepath.Clean(req.SandboxSubdir); req.SandboxSubdir != "" &&
+		sub != "." && sub != ".." &&
+		!strings.ContainsAny(sub, "/\\") {
+		workingDir = filepath.Join(workingDir, sub)
+		if hostDir != "" && hostDir != "." {
+			hostDir = filepath.Join(hostDir, sub)
+		}
+	}
+
 	// Classify tier from message
 	tier := classifyAgentTier(req.Message)
 
 	// Create agent context
 	ctx := NewAgentContext(workingDir, tier)
+	ctx.BypassV3 = req.BypassV3
+	ctx.DisableFreshSlot = req.DisableFreshSlot
 	// Stash the host path so resolveAgentPath can translate absolute
 	// host paths the model receives in user prompts (e.g. "fix
 	// /home/isaac/snake/app.py") into the container path. Without this
