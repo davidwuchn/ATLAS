@@ -207,6 +207,7 @@ services:
     build:
       context: ./proxy
     environment:
+      - ATLAS_GRAMMAR_MODE=${ATLAS_GRAMMAR_MODE:-strict}
       - ATLAS_PROXY_PORT=8090
       - ATLAS_INFERENCE_URL=http://llama-server:8080
       - ATLAS_LLAMA_URL=http://llama-server:8080
@@ -229,6 +230,7 @@ services:
       # working_dir below and the right-hand side of the volume mount.
       - ATLAS_WORKSPACE_DIR=/workspace
     volumes:
+      - ${ATLAS_MODELS_DIR:-./models}:/models:ro
       - ${ATLAS_PROJECT_DIR:-.}:/workspace
     working_dir: /workspace
     ports:
