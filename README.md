@@ -31,7 +31,6 @@ Open models historically can't keep up with hosted ones. ATLAS gets there anyway
 
 ## 🔥 Latest News
 
-- **2026-05-12** - **[V3.1.0 "Maia" released](https://github.com/itigges22/ATLAS/releases/tag/v3.1.0)** - native Bubbletea TUI, one-command bootstrap, streaming Lens + ASA activation steering, AST-aware surgical edits
 - **2026-04-13** - ["How to Run an AI Coding Assistant on a $500 GPU and Beat Claude Sonnet"](https://devtrends.ru/python/itigges22-atlas) - devtrends.ru
 - **2026-04-05** - **[V3.0.1 released](CHANGELOG.md)** - interactive CLI, Docker Compose deployment, 95.8% reliability
 - **2026-04-03** - ["$500 GPU Beats Claude: Local AI Revolution for Web Devs"](https://ownet.it/blog/500-gpu-beats-claude-local-ai-revolution-for-web-devs) - ownet.it
@@ -110,18 +109,18 @@ Then in any project directory, run `atlas`.
 
 | | |
 |---|---|
-| GPU | 16 GB+ VRAM. NVIDIA (CUDA), AMD (ROCm), or Apple Silicon (Metal, macOS hybrid); Vulkan covers most other GPUs. See [SETUP.md § Supported GPUs](docs/SETUP.md#supported-gpus). |
+| GPU | 16 GB+ VRAM. NVIDIA (CUDA, V3.1.0+) or AMD (ROCm, V3.1.1). See [SETUP.md § Supported GPUs](docs/SETUP.md#supported-gpus); to size a specific model to your card, see [What fits on my GPU?](docs/TROUBLESHOOTING.md#what-fits-on-my-gpu). |
 | Runtime | Docker (NVIDIA: + nvidia-container-toolkit; AMD: standalone Docker is enough) or Podman |
 | Python | 3.9+ |
 | Disk | ~20 GB CUDA / ~22 GB ROCm (model weights + container images) |
 
-Apple Silicon runs natively through the macOS hybrid Metal path (native llama-server + Docker for the rest — see **[SETUP_MACOS.md](docs/SETUP_MACOS.md)**); Intel Arc (SYCL) is on the roadmap. For the manual install path (Docker Compose, bare-metal, K3s) and the full set of bootstrap flags, see **[SETUP.md](docs/SETUP.md)**.
+Apple Silicon (Metal native install) and Intel Arc (SYCL) are on the V3.1.2+ roadmap. For the manual install path (Docker Compose, bare-metal, K3s) and the full set of bootstrap flags, see **[SETUP.md](docs/SETUP.md)**.
 
 ---
 
 ## ⚠️ Known Limitations
 
-- **Linux Docker stack, plus a native macOS path.** NVIDIA, AMD ROCm, and Vulkan Docker paths ship today; Apple Silicon runs via the native macOS hybrid Metal path ([#32](https://github.com/itigges22/ATLAS/issues/32)). Intel Arc / SYCL is on the roadmap.
+- **Linux-only Docker stack.** NVIDIA and AMD ROCm Docker paths both ship today. Apple Silicon (Metal native install) is V3.1.2 planned. Intel Arc / SYCL is roadmap.
 - **9B model is not formally benchmarked yet.** V3.1.0 ships Qwen3.5-9B with the full V3 pipeline, but the canonical 74.6% LiveCodeBench score is from the 14B reference build. Formal 9B numbers land with V3.1.1. The 14B methodology and ablations live in [`docs/reports/V3_ABLATION_STUDY.md`](docs/reports/V3_ABLATION_STUDY.md); raw traces are on [HuggingFace](https://huggingface.co/datasets/itigges22/ATLAS).
 - **Complex feature additions can be inconsistent.** The model sometimes spends agent turns exploring an unfamiliar codebase before writing code. Reliability has improved on the 9B build since the V3.0 measurement; a fresh number lands with the V3.1.1 benchmark pass.
 - **Grammar-constrained decoding is slow.** Around 51 tok/s on llama-server.
