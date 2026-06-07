@@ -15,7 +15,7 @@
 
 ## Training Data
 
-**In-repo sample**: `geometric-lens/data/sample/` — 10 embeddings (5 PASS, 5 FAIL) showing the data format.
+**In-repo sample**: `geometric-lens/data/sample/embeddings.json` — 10 embeddings (5 PASS, 5 FAIL) showing the training-data format (`{"embeddings": [...], "labels": [1|0, ...]}`; 3840-dim, from a Gemma 4 12B bench run).
 
 **Full dataset on HuggingFace**: https://huggingface.co/datasets/itigges22/ATLAS
 
