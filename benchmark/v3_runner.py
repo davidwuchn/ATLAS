@@ -271,15 +271,22 @@ class LLMAdapter:
         # Generation is serialized unless ATLAS_LLM_PARALLEL=1 (see class docs).
         messages = chatml_to_messages(prompt)
 
-        # Thinking on/off follows the budget tier. The tier reaches this
-        # adapter through the system prompt budget_forcing emitted (the
+        # Thinking on/off follows the system prompt's own ask (the
         # LLMCallable contract is positional, so there's no kwarg to carry
-        # it): think tiers say "Think step by step", nothink says "Respond
-        # directly and concisely". Matching the system message keeps
-        # standard/hard/extreme actually reasoning while nothink stays off.
+        # a tier). Prompts that instruct the model to think get thinking;
+        # structured/concise prompts stay off — matching the pre-migration
+        # behavior where un-prefilled prompts thought naturally:
+        #   budget_forcing think tiers   -> "Think step by step"
+        #   pr_cot repair                -> "Think carefully about the root cause"
+        #   refinement_loop code-gen     -> "Think through the approach"
+        #   derivation_chains code-gen   -> "Think carefully about the approach/how to combine"
+        #   nothink / analysis / constraint prompts carry no think-language.
+        # Reword those prompts and this marker list together.
         system_text = " ".join(m.get("content", "") for m in messages
-                               if m.get("role") == "system")
-        enable_thinking = "Think step by step" in system_text
+                               if m.get("role") == "system").lower()
+        enable_thinking = ("think step by step" in system_text
+                           or "think carefully" in system_text
+                           or "think through" in system_text)
 
         def _generate():
             return chat_completion(

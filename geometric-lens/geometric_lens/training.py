@@ -391,7 +391,8 @@ def load_cost_field(save_dir=None, dim=None):
     """Load trained C(x) model weights.
 
     If dim is None, infers from saved weights. Falls back to EMBEDDING_DIM
-    env var (code default 768, but Qwen3.5-9B uses 4096).
+    env var (code default 768; the real dim is model-dependent —
+    e.g. 4096 for Qwen3.5-9B, 3840 for Gemma 4 12B).
     """
     if save_dir is None:
         save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -451,7 +452,8 @@ def retrain_cost_field_bce(
     - epoch_num: Training epoch number for replay buffer tracking.
 
     Args:
-        embeddings: List of float lists, each 4096-dim (Qwen3.5-9B).
+        embeddings: List of float lists, one per sample (the model's
+            hidden dim — e.g. 4096 for Qwen3.5-9B, 3840 for Gemma 4 12B).
         labels: List of "PASS" or "FAIL" strings.
         epochs: Maximum training epochs.
         lr: Learning rate. If None, selected adaptively based on dataset size.
@@ -658,6 +660,17 @@ def retrain_cost_field_bce(
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         torch.save(model.state_dict(), save_path)
         print(f"Model saved to {save_path}")
+        # Keep the pickle-free twin in lockstep — save_cost_field's
+        # contract: a stale safetensors from a previous model must never
+        # shadow a fresh .pt (atlas publish ships whichever is newer).
+        if save_path.endswith(".pt"):
+            try:
+                from safetensors.torch import save_file
+                st_path = save_path[: -len(".pt")] + ".safetensors"
+                save_file(model.state_dict(), st_path)
+                print(f"Safetensors twin saved to {st_path}")
+            except ImportError:
+                print("safetensors not installed — twin not refreshed")
 
     # Compute energy statistics for Lens Feedback recalibration
     # Note: model.eval() is the PyTorch eval mode toggle, not code evaluation

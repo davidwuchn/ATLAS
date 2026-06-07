@@ -364,10 +364,12 @@ The CI smoke test (`tests` workflow, `llama.cpp patches apply to pinned SHA` job
    git fetch --depth 1 origin <NEW_SHA>
    git checkout -q FETCH_HEAD
    git apply --check $REPO/inference/patches/expose-hidden-states.patch
-   git apply --check $REPO/inference/patches/fix-embeddings-spec-decode.patch
    ```
+   (Only this patch is `git apply`-ed by the build. The spec-decode
+   embeddings fix is applied as a `sed` inside the Dockerfiles and is a
+   no-op when its target line is absent — don't `git apply` it.)
 
-3. **If both apply cleanly:** great, just bump `LLAMA_CPP_REV` in all four Dockerfiles (`Dockerfile`, `Dockerfile.v31`, `Dockerfile.rocm`, `Dockerfile.vulkan`) to the new SHA. The CI smoke test will verify all four agree.
+3. **If it applies cleanly:** great, just bump `LLAMA_CPP_REV` in all four Dockerfiles (`Dockerfile`, `Dockerfile.v31`, `Dockerfile.rocm`, `Dockerfile.vulkan`) to the new SHA. The CI smoke test will verify all four agree.
 
 4. **If a patch fails:** regenerate it against the new SHA.
    ```bash

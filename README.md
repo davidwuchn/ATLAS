@@ -115,13 +115,13 @@ Then in any project directory, run `atlas`.
 | Python | 3.9+ |
 | Disk | ~20 GB CUDA / ~22 GB ROCm (model weights + container images) |
 
-Apple Silicon (Metal native install) and Intel Arc (SYCL) are on the V3.1.2+ roadmap. For the manual install path (Docker Compose, bare-metal, K3s) and the full set of bootstrap flags, see **[SETUP.md](docs/SETUP.md)**.
+Apple Silicon runs natively through the macOS hybrid Metal path (native llama-server + Docker for the rest — see **[SETUP_MACOS.md](docs/SETUP_MACOS.md)**); Intel Arc (SYCL) is on the roadmap. For the manual install path (Docker Compose, bare-metal, K3s) and the full set of bootstrap flags, see **[SETUP.md](docs/SETUP.md)**.
 
 ---
 
 ## ⚠️ Known Limitations
 
-- **Linux-only Docker stack.** NVIDIA and AMD ROCm Docker paths both ship today. Apple Silicon (Metal native install) is V3.1.2 planned. Intel Arc / SYCL is roadmap.
+- **Linux Docker stack, plus a native macOS path.** NVIDIA, AMD ROCm, and Vulkan Docker paths ship today; Apple Silicon runs via the native macOS hybrid Metal path ([#32](https://github.com/itigges22/ATLAS/issues/32)). Intel Arc / SYCL is on the roadmap.
 - **9B model is not formally benchmarked yet.** V3.1.0 ships Qwen3.5-9B with the full V3 pipeline, but the canonical 74.6% LiveCodeBench score is from the 14B reference build. Formal 9B numbers land with V3.1.1. The 14B methodology and ablations live in [`docs/reports/V3_ABLATION_STUDY.md`](docs/reports/V3_ABLATION_STUDY.md); raw traces are on [HuggingFace](https://huggingface.co/datasets/itigges22/ATLAS).
 - **Complex feature additions can be inconsistent.** The model sometimes spends agent turns exploring an unfamiliar codebase before writing code. Reliability has improved on the 9B build since the V3.0 measurement; a fresh number lands with the V3.1.1 benchmark pass.
 - **Grammar-constrained decoding is slow.** Around 51 tok/s on llama-server.

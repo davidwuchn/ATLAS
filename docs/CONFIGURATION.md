@@ -568,7 +568,7 @@ For K3s deployment only. Copy `atlas.conf.example` to `atlas.conf` and edit. The
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ATLAS_ENABLE_SPECULATIVE` | `true` | Gates draft-model download in `scripts/download-models.sh`. Inference-time behavior is currently fixed by the entrypoint (llama.cpp can't speculate hybrid DeltaNet+Attention models yet — see comment in `inference/entrypoint-v3.1-9b.sh`), so this flag only affects whether the draft GGUF is downloaded. |
-| `ATLAS_ENABLE_TRAINING` | `true` | When `true`, `install.sh` applies `templates/training-cronjob.yaml.tmpl` (the nightly cost-field retrain). When `false`, the cronjob is skipped. |
+| `ATLAS_ENABLE_TRAINING` | `false` | Reserved. The nightly retrain CronJob template was removed — `/internal/lens/retrain` requires a `training_data` payload a scheduled trigger cannot supply. Keep `false` until the service exposes a self-contained trigger. |
 
 ### 8.8 Timeouts (seconds)
 
@@ -576,16 +576,6 @@ For K3s deployment only. Copy `atlas.conf.example` to `atlas.conf` and edit. The
 |----------|---------|---------|
 | `ATLAS_LLM_TIMEOUT` | `120` | `scripts/verify-install.sh` for the smoke-test `curl` against llama-server |
 | `ATLAS_HEALTH_CHECK_TIMEOUT` | `10` | `scripts/verify-install.sh` `--max-time` for `curl` against each `/health` endpoint during post-install verification. (The healthchecks defined inside the K3s templates use hardcoded timeouts, not this var.) |
-
-### 8.9 Training cronjob (only when `ATLAS_ENABLE_TRAINING=true`)
-
-Consumed by `templates/training-cronjob.yaml.tmpl`. The job hits `geometric-lens /internal/lens/retrain`, which retrains the C(x) cost-field MLP — not the model itself.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ATLAS_TRAINING_SCHEDULE` | `"0 2 * * *"` | Cron expression for the nightly retrain |
-| `ATLAS_TRAINING_MIN_RATING` | `4` | Minimum user-feedback rating to include in the retrain set |
-| `ATLAS_TRAINING_VALIDATION_THRESHOLD` | `66` | Percentage of held-out validation that must pass for the new C(x) weights to be promoted |
 
 ### 8.10 V3 ablation knobs (benchmark-only)
 
