@@ -131,6 +131,12 @@ embedding-service/
 templates/qdrant-deployment.yaml.tmpl
 templates/embedding-deployment.yaml.tmpl
 
+# ----- K3s render output -----
+# manifests/ is generated from templates/*.yaml.tmpl by
+# scripts/generate-manifests.sh (or install.sh's process_templates step) at
+# install time. Source of truth is templates/, not manifests/.
+manifests/
+
 # ----- Local data (not for git — user provides their own models) -----
 /models/
 
@@ -154,6 +160,11 @@ v2_5_1/
 
 # ATLAS workspace (sandbox staging, backups)
 .atlas/
+
+# /demo per-run sandbox dirs — kept on disk so you can review what each
+# side produced after recording; never checked in.
+.demo-raw-*/
+.demo-v3-*/
 
 # ----- Go build artifacts -----
 proxy/atlas-proxy
