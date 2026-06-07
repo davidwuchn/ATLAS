@@ -64,6 +64,10 @@ type tuiModel struct {
 	proxyURL string
 	events   chan Envelope
 
+	// /demo handoff: set by the slash command just before quitting; main.go
+	// relaunches into the split-pane demo with this length (short|medium|long).
+	launchDemoLength string
+
 	// Visible state
 	width  int
 	height int

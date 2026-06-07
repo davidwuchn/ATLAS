@@ -464,13 +464,16 @@ func writeFileTool() *ToolDef {
 			// V3 takes the model's content as baseline candidate, generates diverse
 			// alternatives via PlanSearch/DivSampling, build-verifies each, and
 			// selects the best. This is the intelligence layer.
-			if fileTier >= Tier2Medium && ctx.V3URL != "" {
+			if fileTier >= Tier2Medium && ctx.V3URL != "" && !ctx.BypassV3 {
 				log.Printf("[write_file] V3 pipeline activating for %s", input.Path)
 				res, err := writeFileWithV3(path, input.Content, ctx)
 				if err == nil && res != nil && res.Success {
 					ctx.SessionWrites[input.Path] = true
 				}
 				return res, err
+			}
+			if ctx.BypassV3 {
+				log.Printf("[write_file] V3 bypassed (demo raw pane) — direct write %s", input.Path)
 			}
 
 			// T1: Direct write — config, data, boilerplate
@@ -579,6 +582,19 @@ func writeFileWithV3(path, baselineContent string, ctx *AgentContext) (*ToolResu
 		if stage == "token" {
 			if ctx.StreamFn != nil {
 				ctx.StreamFn("v3_token", map[string]string{"text": detail})
+			}
+			return
+		}
+		// Reasoning deltas during V3 LLM calls (Qwen3.5's <think>
+		// stream). Forwarded as v3_reasoning_token (NOT plain
+		// reasoning_token) because the agent-loop's reasoning_token
+		// handler in the TUI targets the agent's LLM row — V3 calls
+		// run in a different lifecycle and need their own pipe into
+		// the V3 streaming row. Gives the /demo viewer something to
+		// watch during long PlanSearch / repair phases.
+		if stage == "reasoning_token" {
+			if ctx.StreamFn != nil {
+				ctx.StreamFn("v3_reasoning_token", map[string]string{"text": detail})
 			}
 			return
 		}
@@ -900,7 +916,7 @@ func editFileTool() *ToolDef {
 				}
 			}
 			v3Out := V3EditMetadata{}
-			if fileTier >= Tier2Medium && ctx.V3URL != "" {
+			if fileTier >= Tier2Medium && ctx.V3URL != "" && !ctx.BypassV3 {
 				log.Printf("[edit_file] V3 pipeline activating for %s (file_tier=%d, req_tier=%d)", input.Path, fileTier, ctx.Tier)
 				improved, meta, err := improveContentWithV3(path, newContent, ctx)
 				if err != nil {
@@ -1123,7 +1139,7 @@ func astEditTool() *ToolDef {
 					fileTier = refined
 				}
 			}
-			if ctx.V3URL != "" {
+			if ctx.V3URL != "" && !ctx.BypassV3 {
 				log.Printf("[ast_edit] V3 pipeline activating for %s (oldTier=%d newTier=%d max=%d, req_tier=%d) post-AST-edit", input.Path, oldTier, newTier, fileTier, ctx.Tier)
 				improved, meta, err := improveContentWithV3(path, finalContent, ctx)
 				if err != nil {
@@ -1225,6 +1241,14 @@ func improveContentWithV3(path, content string, ctx *AgentContext) (string, V3Ed
 		}
 		if stage == "token" {
 			ctx.StreamFn("v3_token", map[string]string{"text": detail})
+			return
+		}
+		// Reasoning deltas from V3's LLM calls (see write_file path's
+		// matching branch). Same purpose: visible thinking stream
+		// during long PlanSearch / repair phases. v3_reasoning_token,
+		// not reasoning_token, so it targets the V3 row not the agent row.
+		if stage == "reasoning_token" {
+			ctx.StreamFn("v3_reasoning_token", map[string]string{"text": detail})
 			return
 		}
 		if stage == "llm_start" {
