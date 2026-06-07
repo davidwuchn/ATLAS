@@ -157,8 +157,9 @@ type demoEvent struct {
 	done   *demoStreamDone
 }
 
-// pickPrompt loads docs/demo/demo_prompts.json (search order: cwd, then
-// the binary's docs/ neighbor, then the embedded fallback) and returns
+// pickPrompt loads docs/demo/demo_prompts.json (looked up under the
+// session's working dir, then the process cwd, then the embedded
+// fallback) and returns
 // a random prompt whose difficulty fits the requested length. Bucket
 // rule: `short` picks only difficulty=short; `medium` picks short or
 // medium (so the bank stays useful for 60s cuts even with no `medium`

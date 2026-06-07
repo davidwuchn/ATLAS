@@ -28,7 +28,7 @@ MAX_TESTS_PER_PROBLEM = 50
 # parser can't decode and skips; slimmed rows are ~2 KB (measured: 600
 # rows, 2.4 GB raw -> 1 MB slimmed, parsed tasks identical).
 _ROW_FIELDS = ("question_id", "task_id", "question_content", "starter_code",
-               "canonical_solution", "difficulty",
+               "canonical_solution", "difficulty", "platform",
                "private_test_cases", "public_test_cases")
 
 

@@ -274,8 +274,11 @@ class LLMAdapter:
         # Thinking on/off follows the system prompt's own ask (the
         # LLMCallable contract is positional, so there's no kwarg to carry
         # a tier). Prompts that instruct the model to think get thinking;
-        # structured/concise prompts stay off — matching the pre-migration
-        # behavior where un-prefilled prompts thought naturally:
+        # structured/concise prompts stay off. Note this is a deliberate
+        # narrowing vs pre-migration, where thinking defaulted ON for any
+        # prompt without an in-text /nothink — analysis/decomposition/
+        # constraint prompts incidentally thought; they are now off because
+        # thinking wastes tokens on structured output:
         #   budget_forcing think tiers   -> "Think step by step"
         #   pr_cot repair                -> "Think carefully about the root cause"
         #   refinement_loop code-gen     -> "Think through the approach"

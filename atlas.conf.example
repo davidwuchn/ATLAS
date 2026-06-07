@@ -133,7 +133,7 @@ ATLAS_JWT_SECRET="auto"
 # whether the draft GGUF is downloaded.)
 ATLAS_ENABLE_SPECULATIVE=true
 
-# Enable continuous learning (nightly cost-field retraining cronjob).
+# Continuous learning toggle (reserved — see below).
 # Reserved: nightly lens retraining. The CronJob template was removed —
 # the lens retrain endpoint requires a training_data payload a scheduled
 # trigger cannot supply. Keep false until a self-contained trigger exists.
