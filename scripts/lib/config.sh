@@ -106,12 +106,11 @@ validate_config() {
 
     # Check port conflicts (NodePorts must be unique)
     local ports=(
-        "$ATLAS_API_PORTAL_NODEPORT"
-        "$ATLAS_LLM_PROXY_NODEPORT"
-        "$ATLAS_RAG_API_NODEPORT"
-        "$ATLAS_DASHBOARD_NODEPORT"
+        "$ATLAS_PROXY_NODEPORT"
+        "$ATLAS_LENS_NODEPORT"
         "$ATLAS_LLAMA_NODEPORT"
         "$ATLAS_SANDBOX_NODEPORT"
+        "$ATLAS_V3_NODEPORT"
     )
 
     local seen=()
