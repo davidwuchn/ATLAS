@@ -54,7 +54,9 @@ Docker Compose also sets inter-service URLs using Docker networking (e.g., `http
 |---|---|
 | `cuda` (default) | `docker compose up -d` |
 | `rocm` | `docker compose -f docker-compose.yml -f docker-compose.rocm.yml up -d` |
-| `metal` / `sycl` | Not supported via Docker — see [SETUP.md § Method 1](SETUP.md) for native paths (V3.1.2+) |
+| `vulkan` | `docker compose -f docker-compose.yml -f docker-compose.vulkan.yml up -d` |
+| `metal` (#32 hybrid) | `./scripts/atlas-llama-macos.sh` + `docker compose -f docker-compose.yml -f docker-compose.macos.yml up -d` |
+| `sycl` | Not yet packaged — Intel Arc users should use `vulkan` for now (see [#27](https://github.com/itigges22/ATLAS/issues/27)) |
 
 `atlas init` prints the right invocation as part of its "Next steps" summary. `atlas-bootstrap.sh` picks it automatically based on `tier.detect_gpu()`.
 
@@ -100,7 +102,11 @@ stops at the one step only you can do (the rebuild); the manual flow is:
    (model) architecture '<arch>'`, your `atlas-llama` image's bundled llama.cpp
    predates that architecture and **you must rebuild the inference image**:
    ```bash
-   docker compose build llama-server   # clones llama.cpp at HEAD, ~70 min on CUDA
+   # The image pins llama.cpp (LLAMA_CPP_REV in inference/Dockerfile.v31) so
+   # the PC-202 patch applies cleanly — a plain rebuild reuses that same
+   # pinned revision and will NOT pick up newer architectures. Override the
+   # pin with a llama.cpp commit that knows your model's architecture:
+   docker compose build --build-arg LLAMA_CPP_REV=<sha> llama-server   # ~70 min on CUDA
    ```
    > ⚠️ **Do not strip ATLAS's custom llama.cpp features when rebuilding.** The
    > build re-applies `inference/patches/expose-hidden-states.patch` (PC-202 —
@@ -169,6 +175,7 @@ The Go proxy that runs the agent loop, routes tool calls, and orchestrates the A
 | `ATLAS_KEEP_LLAMA_WARM` | `1` | Set to `0` to disable the keep-warm goroutine that pings llama-server every 45s with a 1-token completion. Keeping warm avoids the cold-start path that fires after 1-2 min idle (see ISSUES.md PC-035). Disable for CPU-only or tightly power-budgeted setups. |
 | `ATLAS_FRESH_SLOT_PER_SESSION` | `1` | Set to `0` to disable per-session llama.cpp KV-slot erase. With it enabled (default), the proxy POSTs `/slots/0?action=erase` at the start of each agent loop invocation, giving each turn a clean cache. Adds ~1-2s to the first turn but prevents cross-session token-state leakage (e.g. filenames hallucinated from prior sessions). See ISSUES.md PC-045. |
 | `ATLAS_MAX_TURNS` | (unset) | Operator override for the agent-loop turn cap. Any positive int caps all tiers; unset / `0` / invalid falls through to tier defaults (T0=5, T1/T2/T3=uncapped). See `proxy/types.go:envOverrideMaxTurns`. |
+| `ATLAS_GRAMMAR_MODE` | `strict` | Schema-constrained JSON sampling (#33). Default `strict` ships the full tool-call schema in `response_format` so llama-server's C-side sampler converts it to internal GBNF and the token decoder can ONLY emit our `tool_call/text/done` union. Previously the model could emit any valid JSON and we'd reject + retry post-hoc, burning tokens. Set to `loose` to revert to the old `{"type":"json_object"}` payload — escape hatch for models that handle schema-to-GBNF poorly. |
 | `ATLAS_CONTROL_VECTOR` | `/models/ast_edit_steering.gguf` | Path to the ASA control-vector GGUF for ast_edit steering. Auto-loaded if the file exists; ignored otherwise. |
 | `ATLAS_CONTROL_VECTOR_SCALE` | `0.5` | Strength multiplier applied to the control vector via `--control-vector-scaled`. |
 | `ATLAS_CONTROL_VECTOR_LAYER_RANGE` | (unset) | Restrict the control vector to a layer band. Format is two space-separated integers (e.g. `"24 30"`) — passed straight to llama-server's `--control-vector-layer-range start end`. Unset applies it to all layers. |
