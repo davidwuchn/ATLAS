@@ -83,6 +83,9 @@ VALID_TIERS = frozenset(BUDGET_TIERS.keys())
 # System prompts per tier category. Thinking is controlled model-agnostically
 # by the shared client (`enable_thinking` chat-template kwarg) rather than by an
 # in-prompt directive, so no `/nothink` token here — these are plain English.
+# COUPLING: v3_runner's LLMAdapter derives enable_thinking from these exact
+# phrasings ("Think step by step" = thinking on) because the LLMCallable
+# contract has no tier parameter. Reword them and the adapter together.
 _SYSTEM_PROMPT_NOTHINK = (
     "You are an expert programmer. Respond directly and concisely."
 )

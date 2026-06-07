@@ -269,13 +269,26 @@ class LLMAdapter:
         # `prompt` may be a ChatML string (from phase modules) or raw text;
         # chatml_to_messages() normalizes it so the model's own template applies.
         # Generation is serialized unless ATLAS_LLM_PARALLEL=1 (see class docs).
+        messages = chatml_to_messages(prompt)
+
+        # Thinking on/off follows the budget tier. The tier reaches this
+        # adapter through the system prompt budget_forcing emitted (the
+        # LLMCallable contract is positional, so there's no kwarg to carry
+        # it): think tiers say "Think step by step", nothink says "Respond
+        # directly and concisely". Matching the system message keeps
+        # standard/hard/extreme actually reasoning while nothink stays off.
+        system_text = " ".join(m.get("content", "") for m in messages
+                               if m.get("role") == "system")
+        enable_thinking = "Think step by step" in system_text
+
         def _generate():
             return chat_completion(
                 self.runner.llm_url,
-                messages=chatml_to_messages(prompt),
+                messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=seed,
+                enable_thinking=enable_thinking,
                 want_logprobs=True,
                 timeout=self.timeout,
             )
