@@ -1049,6 +1049,17 @@ func (m *tuiModel) appendChatEvent(ev chatEvent) {
 		// is always set; processed/total/pct are present only when
 		// llama-server's /slots endpoint exposes them. We render a bar
 		// when we have %, a spinner+timer otherwise.
+		//
+		// Guard: the poller runs on a fixed cadence and can emit one more
+		// progress event AFTER llm_first_token has flipped the row to
+		// "decoding…" and tokens are streaming. Without this check that
+		// stale event overwrites the live token row, the next token
+		// overwrites it back, and the row flickers between "encoding" and
+		// the stream every frame. Once promptEvalStart is zeroed (decoding
+		// has begun) we're past prompt eval — drop late progress events.
+		if m.promptEvalStart.IsZero() {
+			break
+		}
 		var p struct {
 			Processed int     `json:"processed"`
 			Total     int     `json:"total"`

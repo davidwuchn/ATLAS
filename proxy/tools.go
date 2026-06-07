@@ -843,7 +843,20 @@ func editFileTool() *ToolDef {
 					return nil, fmt.Errorf("string to replace not found in file. Your `old_str` contains HTML-entity-encoded characters (`&lt;` / `&gt;` / `&amp;`) but the file on disk has literal `<` / `>` / `&`. Re-emit `old_str` with literal angle brackets — JSON strings should contain literal `<` not `&lt;`.%s\nSearched for: %s",
 						alt, truncateStr(input.OldStr, 200))
 				}
-				return nil, fmt.Errorf("string to replace not found in file.\nSearched for: %s", truncateStr(input.OldStr, 200))
+				// Generic mismatch — the model's old_str doesn't byte-match
+				// the file (whitespace, quotes, or paraphrase drift, which
+				// smaller models do constantly). For structured files,
+				// ast_edit sidesteps the whole problem: it selects the node
+				// by name, no old_str to reproduce exactly. Steer there.
+				ext := strings.ToLower(filepath.Ext(input.Path))
+				astAlt := ""
+				if ext == ".py" || ext == ".html" || ext == ".htm" {
+					astAlt = " To replace a whole function/class/element without " +
+						"matching exact text, use ast_edit with a selector " +
+						"(e.g. `function:NAME`, `class:NAME`, `<body>`) and the " +
+						"new content — no old_str needed, so a near-miss can't fail it."
+				}
+				return nil, fmt.Errorf("string to replace not found in file. old_str must match the file byte-for-byte (whitespace and quotes included).%s\nSearched for: %s", astAlt, truncateStr(input.OldStr, 200))
 			}
 
 			// Check uniqueness

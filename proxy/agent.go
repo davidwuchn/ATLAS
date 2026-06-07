@@ -196,6 +196,12 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 
 	consecutiveReads := 0       // Track consecutive read-only calls
 	consecutiveErrors := 0      // Track consecutive tool failures to break error loops
+	// edit_file old_str-mismatch failures per path. A successful read_file
+	// between attempts resets consecutiveErrors/RecentFailurePaths, which
+	// masks the classic read→edit-miss→read loop (smaller models can't
+	// reproduce old_str byte-for-byte). This counter survives interleaved
+	// reads so we can force the ast_edit steer after the second miss.
+	editMissByPath := map[string]int{}
 	madeProductiveChange := false // Set when a write/edit/delete succeeds in this run.
 	// Used to soften the consecutiveErrors exit: post-write run_command failures
 	// are usually verification noise, not "stuck loop" — see PC-025 Sub-finding B.
@@ -871,6 +877,27 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 			// TTY for curses, missing toolchain, etc.), a different exit
 			// message is appropriate so the user isn't told "the file may
 			// be too large to modify" when their file is, in fact, on disk.
+			// edit_file old_str miss: count per path independently of the
+			// consecutiveErrors reset an interleaved read causes. On the
+			// second miss for the same structured file, force the ast_edit
+			// steer as a [system note] (the inline tool-error hint alone
+			// doesn't reliably move a small model off edit_file).
+			if !result.Success && parsed.Name == "edit_file" &&
+				strings.Contains(result.Error, "string to replace not found") {
+				mp := extractFailurePath(parsed.Name, parsed.Args)
+				editMissByPath[mp]++
+				ext := strings.ToLower(filepath.Ext(mp))
+				if editMissByPath[mp] >= 2 && (ext == ".py" || ext == ".html" || ext == ".htm") {
+					pendingRepeatCorrective = "edit_file has failed to match old_str " +
+						"on " + mp + " twice — stop re-reading and stop retrying " +
+						"edit_file. Use ast_edit instead: {\"path\":\"" + mp + "\"," +
+						"\"selector\":\"function:NAME\" (or class:NAME, or <tag> for " +
+						"HTML), \"content\":\"<the full replacement node>\"}. ast_edit " +
+						"needs no old_str, so it can't miss on whitespace."
+					log.Printf("[agent] edit_file double-miss on %q — forcing ast_edit steer", mp)
+				}
+			}
+
 			if !result.Success {
 				consecutiveErrors++
 				// May 10 2026: path-aware breaker. Track which file each
