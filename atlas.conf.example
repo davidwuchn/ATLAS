@@ -134,8 +134,10 @@ ATLAS_JWT_SECRET="auto"
 ATLAS_ENABLE_SPECULATIVE=true
 
 # Enable continuous learning (nightly cost-field retraining cronjob).
-# When false, install.sh skips templates/training-cronjob.yaml.tmpl.
-ATLAS_ENABLE_TRAINING=true
+# Reserved: nightly lens retraining. The CronJob template was removed —
+# the lens retrain endpoint requires a training_data payload a scheduled
+# trigger cannot supply. Keep false until a self-contained trigger exists.
+ATLAS_ENABLE_TRAINING=false
 
 #-------------------------------------------
 # Timeouts (seconds)
@@ -145,19 +147,6 @@ ATLAS_LLM_TIMEOUT=120
 
 # Per-service /health curl timeout (scripts/verify-install.sh)
 ATLAS_HEALTH_CHECK_TIMEOUT=10
-
-#-------------------------------------------
-# Training Cronjob (only when ATLAS_ENABLE_TRAINING=true)
-#-------------------------------------------
-# Cron schedule for the nightly cost-field retrain
-ATLAS_TRAINING_SCHEDULE="0 2 * * *"
-
-# Minimum user-feedback rating to include in the retrain set
-ATLAS_TRAINING_MIN_RATING=4
-
-# Percentage of held-out validation that must pass for new C(x)
-# weights to be promoted
-ATLAS_TRAINING_VALIDATION_THRESHOLD=66
 
 #-------------------------------------------
 # V3 Ablation Knobs (benchmark/v3_runner.py only)

@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
       - name: proxy
-        image: ghcr.io/itigges22/atlas-proxy:${ATLAS_IMAGE_TAG}
+        image: ghcr.io/${ATLAS_GHCR_OWNER}/atlas-proxy:${ATLAS_IMAGE_TAG}
         workingDir: /workspace
         ports:
         - containerPort: ${ATLAS_PROXY_PORT}

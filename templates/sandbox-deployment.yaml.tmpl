@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
       - name: sandbox
-        image: ghcr.io/itigges22/atlas-sandbox:${ATLAS_IMAGE_TAG}
+        image: ghcr.io/${ATLAS_GHCR_OWNER}/atlas-sandbox:${ATLAS_IMAGE_TAG}
         ports:
         - containerPort: ${ATLAS_SANDBOX_PORT}
           name: http

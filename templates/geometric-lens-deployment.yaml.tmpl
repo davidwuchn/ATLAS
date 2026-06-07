@@ -28,7 +28,7 @@ spec:
     spec:
       containers:
       - name: lens
-        image: ghcr.io/itigges22/atlas-lens:${ATLAS_IMAGE_TAG}
+        image: ghcr.io/${ATLAS_GHCR_OWNER}/atlas-lens:${ATLAS_IMAGE_TAG}
         ports:
         - containerPort: ${ATLAS_LENS_PORT}
           name: http
