@@ -203,6 +203,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 	// reproduce old_str byte-for-byte). This counter survives interleaved
 	// reads so we can force the ast_edit steer after the second miss.
 	editMissByPath := map[string]int{}
+	repeatDetections := 0       // hard-stop after the 2nd repeated-identical-call detection
 	madeProductiveChange := false // Set when a write/edit/delete succeeds in this run.
 	// Used to soften the consecutiveErrors exit: post-write run_command failures
 	// are usually verification noise, not "stuck loop" — see PC-025 Sub-finding B.
@@ -733,6 +734,25 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				})
 				pendingRepeatCorrective = msg
 				ctx.RecentToolCalls = nil // reset so we don't re-fire
+				repeatDetections++
+				// The soft corrective is frequently ignored — a small model
+				// re-emits the identical failing call regardless (observed:
+				// the same `python -c "...)))"` typo run 4× after the actual
+				// edit had already landed). Hard-stop instead of nudging
+				// when EITHER the work is already done (productive change +
+				// the model is now spinning on verification) OR the same
+				// call has been detected as repeating twice (genuinely
+				// stuck, no progress to protect).
+				if madeProductiveChange {
+					log.Printf("[agent] repetition after a productive change — stopping (work landed; model looping on verification)")
+					ctx.Stream("done", map[string]string{"summary": "Made your change. The follow-up verification command kept repeating and failing (often a typo in the command, not the edit) — the change is on disk; run it yourself to confirm."})
+					return nil
+				}
+				if repeatDetections >= 2 {
+					log.Printf("[agent] second repetition detection at turn %d — breaking stuck loop", turn)
+					ctx.Stream("done", map[string]string{"summary": "Stopped: the same tool call kept repeating without making progress. Try a more specific instruction (e.g. name the file and the exact change)."})
+					return nil
+				}
 			}
 
 			// Reasoning-repetition detector (BiasBusters #30). The

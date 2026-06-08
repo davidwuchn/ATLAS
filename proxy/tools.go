@@ -1271,20 +1271,25 @@ func astEditTool() *ToolDef {
 				return &ToolResult{Success: false, Error: rejection}, nil
 			}
 
-			// V3 quality-gate routing. Two May 10 2026 corrections to the
-			// May 9 v1:
-			//   (a) Tier classification used post-edit content only. When
-			//       ast_edit produced a destructive stub (32B), tier
-			//       classified as T1 and V3 skipped the very edits that
-			//       most needed quality-checking. Switched to
-			//       max(oldTier, newTier) so destructive edits to T2+
-			//       originals always trigger V3.
-			//   (b) Even with the max-tier fix, the Tier2Medium floor
-			//       made V3 too rare. Lead requested V3 fire on
-			//       essentially every ast_edit emit — drop the floor
-			//       entirely for ast_edit when V3URL is configured.
-			//       T1 ast_edits run V3 too; only when V3URL is empty
-			//       does ast_edit ship its result without quality gating.
+			// V3 quality-gate routing. History:
+			//   (a) May 10: tier classified on post-edit content only, so a
+			//       destructive ast_edit that shrank a T2+ file into a stub
+			//       classified T1 and skipped V3 — the edits that most need
+			//       checking. Fixed by classifying on max(oldTier, newTier).
+			//   (b) May 10: floor dropped entirely so V3 fired on every
+			//       ast_edit.
+			//   (c) Jun 8: floor restored to Tier2Medium. With (b), every
+			//       one-line ast_edit ran the full PlanSearch pipeline —
+			//       minutes per edit on a reasoning-heavy model, blocking the
+			//       single-threaded v3-service and looking like a hang. But
+			//       ast_edit is ALREADY surgical: the model named the exact
+			//       node and the replacement is its own tree-sitter
+			//       transform. PlanSearch-improving a precise node swap is
+			//       mostly cost. Gate it to T2+ files (same as edit_file /
+			//       write_file): trivial edits apply instantly, V3 still
+			//       engages where the file is genuinely complex. max-tier
+			//       from (a) is preserved, so a destructive edit to a T2+
+			//       original still triggers V3.
 			//
 			// Baseline candidate is the AST-edited full file. V3's
 			// alternatives compete against it; if one build-verifies
@@ -1304,7 +1309,7 @@ func astEditTool() *ToolDef {
 					fileTier = refined
 				}
 			}
-			if ctx.V3URL != "" && !ctx.BypassV3 {
+			if fileTier >= Tier2Medium && ctx.V3URL != "" && !ctx.BypassV3 {
 				log.Printf("[ast_edit] V3 pipeline activating for %s (oldTier=%d newTier=%d max=%d, req_tier=%d) post-AST-edit", input.Path, oldTier, newTier, fileTier, ctx.Tier)
 				improved, meta, err := improveContentWithV3(path, finalContent, ctx)
 				if err != nil {
