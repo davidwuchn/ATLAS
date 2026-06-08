@@ -215,6 +215,12 @@ services:
       - ATLAS_SANDBOX_URL=http://sandbox:8020
       - ATLAS_V3_URL=http://v3-service:8070
       - ATLAS_MODEL_NAME=${ATLAS_MODEL_NAME:-Qwen3.5-9B-Q6_K}
+      # Context budget for conversation trimming (PC-216). Same
+      # values the llama-server gets; the proxy trims history to a
+      # token budget derived from per-slot context instead of a
+      # blind message count, so a just-read file isn't dropped.
+      - ATLAS_CTX_SIZE=${ATLAS_CTX_SIZE:-131072}
+      - ATLAS_PARALLEL_SLOTS=${ATLAS_PARALLEL_SLOTS:-4}
       # PC-192: opt-in host execution for run_command. Set to "host"
       # to bypass the sandbox container and run verifications on the
       # host (works when proxy runs locally, not in Docker — Docker

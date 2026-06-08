@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -259,11 +260,18 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 		// Hardcoding ctx.Messages[1] as the user msg used to work, but
 		// PriorHistory makes that index a prior-turn message instead — so
 		// scan backwards for the actual current-turn user role.
+		// Trim by TOKEN BUDGET, not a blind message count (PC-216). The
+		// old `> 12 messages → keep 8` rule dropped a just-read file after
+		// a couple of turns even when the prompt was a fraction of the
+		// context window — the model would then re-read in a loop, saying
+		// "I don't see the output in the history". keepLast is now derived
+		// from how many recent messages actually fit the per-slot budget,
+		// floored at 8 so we never trim more aggressively than before.
 		trimmed := false
-		if len(ctx.Messages) > 12 {
-			ctx.Messages = trimMessages(ctx.Messages, 8)
+		if keep := budgetedKeepLast(ctx.Messages); keep < len(ctx.Messages)-1 {
+			ctx.Messages = trimMessages(ctx.Messages, keep)
 			trimmed = true
-			log.Printf("[agent] trimmed conversation to %d messages", len(ctx.Messages))
+			log.Printf("[agent] trimmed conversation to %d messages (token-budget)", len(ctx.Messages))
 		}
 
 		// Per-turn streaming visibility: announce the start of the turn,
@@ -1834,6 +1842,67 @@ func buildSystemPrompt(ctx *AgentContext) string {
 	}
 
 	return sb.String()
+}
+
+// estTokens is a cheap, model-agnostic token estimate: ~4 chars/token plus
+// a small per-message framing overhead. Good enough for budgeting; we leave
+// generous headroom so the estimate never has to be exact.
+func estTokens(content string) int {
+	return len(content)/4 + 8
+}
+
+// conversationTokenBudget is how many prompt tokens the agent loop will let
+// the conversation grow to before trimming. Derived from the deployment's
+// per-slot context (ATLAS_CTX_SIZE / ATLAS_PARALLEL_SLOTS), reserving ~35%
+// for the response. Model-agnostic: keys off the context the deploy gives,
+// not the model identity. Falls back to a safe default when env is absent.
+func conversationTokenBudget() int {
+	ctx := 131072
+	if v := envOr("ATLAS_CTX_SIZE", ""); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			ctx = n
+		}
+	}
+	slots := 4
+	if v := envOr("ATLAS_PARALLEL_SLOTS", ""); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			slots = n
+		}
+	}
+	perSlot := ctx / slots
+	budget := perSlot * 65 / 100 // leave ~35% of the slot for the response
+	if budget < 4000 {
+		budget = 4000 // floor: tiny-context deploys still keep a usable window
+	}
+	return budget
+}
+
+// budgetedKeepLast returns how many trailing messages trimMessages should
+// keep so the kept set (system + pinned user + tail) fits the token budget.
+// Floored at 8 (never trim more aggressively than the old fixed rule); when
+// the whole conversation fits, returns len(msgs) so nothing is trimmed.
+func budgetedKeepLast(msgs []AgentMessage) int {
+	if len(msgs) == 0 {
+		return 0
+	}
+	budget := conversationTokenBudget()
+	used := 0
+	if len(msgs) > 0 {
+		used += estTokens(msgs[0].Content) // system prompt is always kept
+	}
+	keep := 0
+	for i := len(msgs) - 1; i >= 1; i-- {
+		t := estTokens(msgs[i].Content)
+		if used+t > budget && keep >= 8 {
+			break
+		}
+		used += t
+		keep++
+	}
+	if keep > len(msgs)-1 {
+		keep = len(msgs) - 1
+	}
+	return keep
 }
 
 // trimMessages caps a conversation at roughly 1 (system) + 1 (pinned user) +
