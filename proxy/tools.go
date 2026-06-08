@@ -964,6 +964,23 @@ func editFileTool() *ToolDef {
 				}
 			}
 			if actualOldStr == "" {
+				// Last resort before failing: whitespace-tolerant line match.
+				// Small models can't reproduce a code block byte-for-byte —
+				// indentation width, tabs-vs-spaces, and trailing spaces drift
+				// constantly — so exact old_str matching is the #1 reason
+				// edit_file fails for them, which strands the whole V3/lens
+				// stack (it only engages after a successful edit). This
+				// matches old_str against the file ignoring per-line leading/
+				// trailing whitespace, and ONLY accepts a UNIQUE match — an
+				// ambiguous or content-different old_str still fails, so it
+				// can never silently edit the wrong place. Exact-matching
+				// (frontier) models never reach this path. See GH #39.
+				if fuzzy, ok := findFuzzyLineMatch(content, input.OldStr); ok {
+					log.Printf("[edit_file] exact old_str missed on %s; unique whitespace-tolerant match found — proceeding (small-model indentation drift)", input.Path)
+					actualOldStr = fuzzy
+				}
+			}
+			if actualOldStr == "" {
 				// Mismatch persists — return targeted error.
 				hasEntities := strings.Contains(input.OldStr, "&lt;") ||
 					strings.Contains(input.OldStr, "&gt;") ||
@@ -1455,6 +1472,72 @@ func improveContentWithV3(path, content string, ctx *AgentContext) (string, V3Ed
 
 // findActualString searches for oldStr in content, handling quote normalization.
 // Returns the actual string found in content (may differ in quote style).
+// findFuzzyLineMatch rescues an old_str whose only error is per-line
+// whitespace drift (indentation width, tabs vs spaces, trailing spaces) —
+// the dominant edit_file failure mode for small models. It compares old_str
+// against the file line-by-line with each line whitespace-stripped, and
+// returns the EXACT span from the file (original indentation preserved) so
+// the caller's existing uniqueness-count + replace logic works unchanged.
+//
+// Safety: it requires exactly ONE matching window. Zero or multiple matches
+// return ("", false) so the caller fails cleanly rather than editing a
+// guessed location. It also refuses to match when old_str has no
+// non-whitespace content (would match any blank run). Content differences
+// beyond whitespace (renamed tokens, changed quotes) do NOT match — those
+// are semantic and must fail.
+func findFuzzyLineMatch(content, oldStr string) (string, bool) {
+	fileLines := strings.Split(content, "\n")
+	oldLines := strings.Split(oldStr, "\n")
+	// Drop a single trailing empty line from a trailing newline in old_str.
+	if len(oldLines) > 1 && strings.TrimSpace(oldLines[len(oldLines)-1]) == "" {
+		oldLines = oldLines[:len(oldLines)-1]
+	}
+	if len(oldLines) == 0 {
+		return "", false
+	}
+	strip := func(ls []string) []string {
+		out := make([]string, len(ls))
+		nonEmpty := false
+		for i, l := range ls {
+			out[i] = strings.TrimSpace(l)
+			if out[i] != "" {
+				nonEmpty = true
+			}
+		}
+		if !nonEmpty {
+			return nil // all-whitespace target: refuse
+		}
+		return out
+	}
+	want := strip(oldLines)
+	if want == nil {
+		return "", false
+	}
+	n := len(want)
+	matchStart := -1
+	matches := 0
+	for i := 0; i+n <= len(fileLines); i++ {
+		ok := true
+		for j := 0; j < n; j++ {
+			if strings.TrimSpace(fileLines[i+j]) != want[j] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			matches++
+			matchStart = i
+			if matches > 1 {
+				return "", false // ambiguous — fail safe
+			}
+		}
+	}
+	if matches != 1 {
+		return "", false
+	}
+	return strings.Join(fileLines[matchStart:matchStart+n], "\n"), true
+}
+
 func findActualString(content, oldStr string) string {
 	// Direct match first
 	if strings.Contains(content, oldStr) {

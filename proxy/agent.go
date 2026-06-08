@@ -895,14 +895,20 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				mp := extractFailurePath(parsed.Name, parsed.Args)
 				editMissByPath[mp]++
 				ext := strings.ToLower(filepath.Ext(mp))
-				if editMissByPath[mp] >= 2 && (ext == ".py" || ext == ".html" || ext == ".htm") {
-					pendingRepeatCorrective = "edit_file has failed to match old_str " +
-						"on " + mp + " twice — stop re-reading and stop retrying " +
-						"edit_file. Use ast_edit instead: {\"path\":\"" + mp + "\"," +
-						"\"selector\":\"function:NAME\" (or class:NAME, or <tag> for " +
-						"HTML), \"content\":\"<the full replacement node>\"}. ast_edit " +
-						"needs no old_str, so it can't miss on whitespace."
-					log.Printf("[agent] edit_file double-miss on %q — forcing ast_edit steer", mp)
+				// Force the ast_edit steer on the FIRST miss for structured
+				// files — small models bail to run_command after a single
+				// edit_file miss rather than retrying, so waiting for a
+				// second miss never fires (observed: 1 edit_file all session,
+				// then 9 run_command re-runs).
+				if editMissByPath[mp] >= 1 && (ext == ".py" || ext == ".html" || ext == ".htm") {
+					pendingRepeatCorrective = "edit_file's old_str did not match " +
+						mp + " (small drift in whitespace/quotes is enough to miss). " +
+						"Do NOT re-read or run the file — switch to ast_edit, which " +
+						"needs no old_str: {\"type\":\"tool_call\",\"name\":\"ast_edit\"," +
+						"\"args\":{\"path\":\"" + mp + "\",\"selector\":\"function:NAME\" " +
+						"(or class:NAME, or <tag> for HTML),\"content\":\"<the full " +
+						"replacement function/class/element>\"}}."
+					log.Printf("[agent] edit_file miss on %q — forcing ast_edit steer", mp)
 				}
 			}
 
