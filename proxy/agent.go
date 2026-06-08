@@ -948,8 +948,16 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				ctx.RecentFailurePaths = nil
 			}
 
-			// Track consecutive read-only calls to detect exploration loops
-			isReadOnly := parsed.Name == "read_file" || parsed.Name == "list_directory" || parsed.Name == "search_files"
+			// Track consecutive read-only calls to detect exploration loops.
+			// outline_file/find_file MUST be here too — otherwise an
+			// interleaved outline resets the counter and the model
+			// read→outline→read→outline forever without the breaker firing
+			// (observed live with Gemma). Every navigation-only tool counts.
+			isReadOnly := parsed.Name == "read_file" ||
+				parsed.Name == "outline_file" ||
+				parsed.Name == "list_directory" ||
+				parsed.Name == "search_files" ||
+				parsed.Name == "find_file"
 			if isReadOnly {
 				consecutiveReads++
 			} else {

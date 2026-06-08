@@ -155,7 +155,11 @@ exec /usr/local/bin/llama-server \
   -ub $UBATCH_SIZE \
   --slot-save-path "$SLOT_SAVE_PATH" \
   --ctx-checkpoints 0 \
-  --no-cache-prompt \
+  `# Prompt caching is ON: each agent-loop turn reuses the prior turn's` \
+  `# encoded prefix instead of re-encoding the whole conversation, which` \
+  `# is what keeps multi-turn sessions fast. Cross-session isolation is` \
+  `# handled by the proxy erasing the KV slot at session start (PC-045),` \
+  `# not by disabling the cache.` \
   --embeddings \
   --jinja \
   $CVECTOR_FLAGS
