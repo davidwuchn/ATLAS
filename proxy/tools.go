@@ -709,7 +709,7 @@ func writeFileWithV3(path, baselineContent string, ctx *AgentContext) (*ToolResu
 	//   llm_end     \u2014 V3's LLM call finished (with token/timing summary)
 	//   <other>     \u2014 pipeline stage marker (probe, plansearch, sandbox\u2026)
 	currentV3Stage := ""
-	v3Result, err := callV3GenerateStreaming(ctx.V3URL, req, func(stage, detail string, data map[string]interface{}) {
+	v3Result, err := callV3GenerateStreaming(ctx.Ctx, ctx.V3URL, req, func(stage, detail string, data map[string]interface{}) {
 		// Token deltas: forward to the TUI on a separate SSE event so
 		// it can render them as a streaming dim row, mirroring how the
 		// agent's own LLM tokens are shown. No envelope (would bloat
@@ -1400,7 +1400,7 @@ func improveContentWithV3(path, content string, ctx *AgentContext) (string, V3Ed
 	// unknown stages fall back to the v3_progress text line. Without
 	// this branching, edit_file with V3 floods the chat pane with
 	// thousands of "[token] X" rows during a single candidate generation.
-	v3Result, err := callV3GenerateStreaming(ctx.V3URL, req, func(stage, detail string, data map[string]interface{}) {
+	v3Result, err := callV3GenerateStreaming(ctx.Ctx, ctx.V3URL, req, func(stage, detail string, data map[string]interface{}) {
 		if ctx.StreamFn == nil {
 			return
 		}
