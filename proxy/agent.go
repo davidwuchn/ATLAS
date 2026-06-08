@@ -1731,7 +1731,8 @@ func buildSystemPrompt(ctx *AgentContext) string {
 
 	// Rules
 	sb.WriteString("## Rules\n\n")
-	sb.WriteString("- Always read a file before editing it (use read_file then edit_file)\n")
+	sb.WriteString("- To work on an EXISTING file, navigate it cheaply first: call `outline_file` to list its functions/classes with line ranges, then `read_file` with `offset`/`limit` to read just the part you need (e.g. the buggy function). Don't dump a whole large file into context — and never re-read the same file in a loop; if a read's content is already in the conversation, act on it.\n")
+	sb.WriteString("- Always read the relevant code before editing it (outline_file → read_file, then edit_file/ast_edit).\n")
 	sb.WriteString("- MANDATORY: Use `edit_file` (targeted old_str/new_str) for any change to a file that already exists, no matter how small. `write_file` is ONLY for creating brand-new files. The agent layer rejects every `write_file` call against an existing file >5 lines — your call won't execute and you'll get a tool error directing you to edit_file. Don't re-emit a whole file to change a few lines.\n")
 	sb.WriteString("  Example — to add a None check to one branch, use:\n")
 	sb.WriteString("    edit_file {\"path\":\"src/foo.py\",\"old_str\":\"if x == 0:\\n        return None\",\"new_str\":\"if x is None or x == 0:\\n        return None\"}\n")

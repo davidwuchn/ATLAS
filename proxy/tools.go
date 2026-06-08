@@ -26,6 +26,7 @@ var toolRegistry = map[string]*ToolDef{}
 
 func init() {
 	registerTool(readFileTool())
+	registerTool(outlineFileTool())
 	registerTool(writeFileTool())
 	registerTool(editFileTool())
 	registerTool(astEditTool())
@@ -211,6 +212,140 @@ func readFileTool() *ToolDef {
 			return &ToolResult{Success: true, Data: outBytes}, nil
 		},
 	}
+}
+
+// ---------------------------------------------------------------------------
+// outline_file — cheap structural index of a file (names + line ranges, no
+// bodies). The surgical-read entry point: outline to see what's in a file
+// for a few hundred bytes, then read_file with offset/limit to pull just
+// the one function you need. Saves the model from dumping a whole file into
+// context (and re-reading it) just to find one bug. GH #39.
+// ---------------------------------------------------------------------------
+
+func outlineFileTool() *ToolDef {
+	return &ToolDef{
+		Name: "outline_file",
+		Description: "List a file's top-level functions and classes with their " +
+			"line ranges — NO bodies, so it costs almost no context. Use this " +
+			"FIRST to navigate an existing file instead of reading the whole " +
+			"thing: outline_file to find the function you care about, then " +
+			"read_file with offset/limit to read just its lines, then ast_edit " +
+			"(selector function:NAME / class:NAME) or edit_file to change it. " +
+			"Python is parsed precisely (tree-sitter, decorator-aware); other " +
+			"languages get a best-effort definition scan.",
+		InputSchema: OutlineInput{},
+		ReadOnly:    true,
+		Destructive: false,
+		Execute: func(rawInput json.RawMessage, ctx *AgentContext) (*ToolResult, error) {
+			var input OutlineInput
+			if err := json.Unmarshal(rawInput, &input); err != nil {
+				return nil, fmt.Errorf("invalid input: %w", err)
+			}
+			if strings.TrimSpace(input.Path) == "" {
+				return &ToolResult{Success: false,
+					Error: "outline_file: path cannot be empty. Pass {\"path\":\"<file>\"}."}, nil
+			}
+			path := resolveAgentPath(ctx, input.Path)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("cannot read %s: %w", input.Path, err)
+			}
+			src := string(data)
+			totalLines := strings.Count(src, "\n") + 1
+
+			// Prefer the v3 tree-sitter outline for .py (accurate, matches
+			// ast_edit selectors). Fall back to a language-agnostic regex
+			// scan for everything else and whenever v3 is unavailable.
+			var syms []OutlineSymbol
+			if strings.HasSuffix(input.Path, ".py") {
+				if v3, ok := outlineViaV3(ctx, input.Path, src); ok {
+					syms = v3
+				}
+			}
+			engine := "tree-sitter"
+			if syms == nil {
+				syms = outlineByRegex(input.Path, src)
+				engine = "scan"
+			}
+
+			ctx.RecordFileRead(path, src)
+			patternReadTracker.add(path)
+
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "%s — %d lines, %d symbols (%s)\n",
+				input.Path, totalLines, len(syms), engine)
+			if len(syms) == 0 {
+				sb.WriteString("(no top-level functions/classes found — read_file to view it directly)\n")
+			}
+			for _, s := range syms {
+				fmt.Fprintf(&sb, "L%d-%d\t%s %s\n", s.StartLine, s.EndLine, s.Kind, s.Name)
+			}
+			out := OutlineOutput{Symbols: syms, Supported: len(syms) > 0}
+			_ = out
+			return &ToolResult{Success: true, Data: []byte(fmt.Sprintf("%q", sb.String()))}, nil
+		},
+	}
+}
+
+// outlineViaV3 asks v3-service for a tree-sitter outline. Returns (nil,false)
+// on any failure so the caller can fall back to the regex scan.
+func outlineViaV3(ctx *AgentContext, path, source string) ([]OutlineSymbol, bool) {
+	if ctx.V3URL == "" {
+		return nil, false
+	}
+	body, _ := json.Marshal(map[string]string{"path": path, "source": source})
+	req, err := http.NewRequestWithContext(ctx.Ctx, "POST",
+		ctx.V3URL+"/internal/outline", bytes.NewReader(body))
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, false
+	}
+	var out OutlineOutput
+	if json.NewDecoder(resp.Body).Decode(&out) != nil || !out.Supported {
+		return nil, false
+	}
+	return out.Symbols, true
+}
+
+// outlineByRegex is the language-agnostic fallback: any line starting (at
+// column 0, allowing common keywords) with a definition. Good enough to give
+// the model line anchors to read from; not as precise as tree-sitter.
+func outlineByRegex(path, source string) []OutlineSymbol {
+	type pat struct {
+		re   *regexp.Regexp
+		kind string
+	}
+	// Ordered, language-agnostic-ish. Name is capture group 1.
+	pats := []pat{
+		{regexp.MustCompile(`^(?:async\s+)?def\s+([A-Za-z_]\w*)`), "function"},
+		{regexp.MustCompile(`^class\s+([A-Za-z_]\w*)`), "class"},
+		{regexp.MustCompile(`^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)`), "function"},
+		{regexp.MustCompile(`^type\s+([A-Za-z_]\w*)`), "type"},
+		{regexp.MustCompile(`^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)`), "function"},
+		{regexp.MustCompile(`^(?:export\s+)?class\s+([A-Za-z_$][\w$]*)`), "class"},
+	}
+	lines := strings.Split(source, "\n")
+	var out []OutlineSymbol
+	for i, ln := range lines {
+		for _, p := range pats {
+			if m := p.re.FindStringSubmatch(ln); m != nil {
+				out = append(out, OutlineSymbol{
+					Name: m[1], Kind: p.kind,
+					StartLine: i + 1, EndLine: i + 1, // single-line anchor; body follows
+				})
+				break
+			}
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

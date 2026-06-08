@@ -141,6 +141,24 @@ type ReadFileOutput struct {
 	EndLine    int    `json:"end_line"`
 }
 
+// -- outline_file --
+
+type OutlineInput struct {
+	Path string `json:"path"`
+}
+
+type OutlineSymbol struct {
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+}
+
+type OutlineOutput struct {
+	Symbols   []OutlineSymbol `json:"symbols"`
+	Supported bool            `json:"supported"`
+}
+
 // -- write_file --
 
 type WriteFileInput struct {

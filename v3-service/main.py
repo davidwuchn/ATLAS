@@ -2788,6 +2788,8 @@ class V3Handler(BaseHTTPRequestHandler):
             self._handle_cyclomatic_complexity()
         elif self.path == "/internal/symbol_index":
             self._handle_symbol_index()
+        elif self.path == "/internal/outline":
+            self._handle_outline()
         elif self.path == "/health":
             self._json_response(200, {"status": "ok"})
         else:
@@ -3126,6 +3128,40 @@ class V3Handler(BaseHTTPRequestHandler):
             flush=True,
         )
         self._json_response(200, result)
+
+    def _handle_outline(self):
+        """POST /internal/outline — list a file's top-level functions/classes.
+
+        Request:  {"path": "app.py", "source": "<file text>"}
+        Response: {"symbols": [{name, kind, start_line, end_line}], "supported": bool}
+
+        Reuses the same decorator-aware tree-sitter walk ast_edit uses, so a
+        symbol the outline names is selectable by ast_edit with the same name.
+        Bodies are NOT returned — this is the cheap "what's in here" probe so
+        the model can then read just the one function's line range instead of
+        the whole file. .py only here; the proxy regex-falls-back for the rest.
+        """
+        content_len = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(content_len) or b"{}")
+        except json.JSONDecodeError as e:
+            self._json_response(400, {"symbols": [], "supported": False, "error": f"invalid JSON body: {e}"})
+            return
+        path = body.get("path", "") or ""
+        source = body.get("source", "") or ""
+        symbols = []
+        supported = False
+        if path.endswith(".py") and _AST_EDIT_AVAILABLE:
+            supported = True
+            src = source.encode("utf-8")
+            for name, kind, sb_, eb in _symbol_index_for_python_source(src):
+                symbols.append({
+                    "name": name,
+                    "kind": kind,
+                    "start_line": src[:sb_].count(b"\n") + 1,
+                    "end_line": src[:eb].count(b"\n") + 1,
+                })
+        self._json_response(200, {"symbols": symbols, "supported": supported})
 
     def _handle_cyclomatic_complexity(self):
         """POST /internal/cyclomatic_complexity — McCabe CC for tier classification.
