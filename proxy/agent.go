@@ -1583,16 +1583,28 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 		}
 		for _, c := range chunk.Choices {
 			if c.Delta.ReasoningContent != "" {
+				// First output of ANY kind means prompt eval is done — for
+				// reasoning models (Gemma streams its whole chain as
+				// reasoning_content, often with no content tokens until the
+				// final JSON) the first delta is reasoning, not content.
+				// Stop the prompt-eval poller and fire llm_first_token here
+				// too; otherwise the poller keeps emitting prompt_progress
+				// for the entire generation, the TUI keeps painting
+				// "encoding", and it fights the streaming reasoning for the
+				// row — the encode timer never stops and the screen flickers.
+				if !firstTokenSent {
+					stopProgressFn()
+					ctx.Stream("llm_first_token", map[string]interface{}{
+						"prompt_ms": time.Since(sentAt).Milliseconds(),
+					})
+					firstTokenSent = true
+				}
 				// Accumulate for the empty-content fallback below AND
-				// stream to the TUI as a separate `reasoning_token`
-				// event so users can see the model's thought process.
-				// May 10 2026 reversal of the original "don't stream
-				// reasoning" rule — operator feedback that the TUI
-				// surfacing only tool calls left the model's reasoning
-				// invisible. The TUI subscribes to reasoning_token
-				// distinctly from llm_token so it can render thinking
-				// in a dimmed/italic pane without mixing it into the
-				// content stream destined for parse.
+				// stream to the TUI as a separate `reasoning_token` event
+				// so users can see the model's thought process. The TUI
+				// subscribes to reasoning_token distinctly from llm_token
+				// so it can render thinking dimmed without mixing it into
+				// the content stream destined for parse.
 				reasoningBuf.WriteString(c.Delta.ReasoningContent)
 				ctx.Stream("reasoning_token", map[string]interface{}{
 					"text": c.Delta.ReasoningContent,

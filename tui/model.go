@@ -558,6 +558,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sid := m.turnSessionID
 				proxyURL := m.proxyURL
 				m.turnActive = false
+				// Stop the encoding/decoding tick from repainting after
+				// cancel — otherwise the "encoding prompt … Ns" timer keeps
+				// ticking forever because promptEvalStart/streamingLLM were
+				// never cleared.
+				m.promptEvalStart = time.Time{}
+				m.streamingLLM = false
 				m.chat = append(m.chat, chatMessage{
 					Role: roleSystem, Meta: "cancelled",
 					Body: "turn cancelled",
