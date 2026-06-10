@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 from . import analyses
-from .extract import is_python
+from .extract import is_supported
 
 
 def _project_graph(file_map: Dict[str, str]):
@@ -24,12 +24,16 @@ def _project_graph(file_map: Dict[str, str]):
 
 
 def symbol_neighborhood(
-    file_map: Dict[str, str], symbol: str, max_items: int = 10
+    file_map: Dict[str, str], symbol: str, max_items: int = 10, graph=None
 ) -> dict:
     """The graph neighborhood of `symbol`: direct callers, direct callees, the
     transitive impact set (everything that can reach it), and the files that
-    define it. Empty lists when the symbol isn't in the graph."""
-    graph = _project_graph(file_map)
+    define it. Empty lists when the symbol isn't in the graph.
+
+    Pass a prebuilt `graph` to neighborhood many symbols without rebuilding the
+    project graph per symbol (the caller should build it once)."""
+    if graph is None:
+        graph = _project_graph(file_map)
     defined_files = sorted({d.file for d in graph.defines if d.name == symbol})
     return {
         "symbol": symbol,
@@ -61,7 +65,7 @@ def repair_context(
     block rather than diluting the error with a useless 'no matches')."""
     if not function_name or not file_map:
         return ""
-    if not any(is_python(p) for p in file_map):
+    if not any(is_supported(p) for p in file_map):
         return ""
 
     graph = _project_graph(file_map)
@@ -92,7 +96,8 @@ def repair_context(
         sb.append("**Direct callers:** none (entry point or called only externally)")
 
     # The impact set beyond the direct callers is the transitive blast radius.
-    transitive = [n for n in impact if n not in set(direct_callers)]
+    direct_set = set(direct_callers)
+    transitive = [n for n in impact if n not in direct_set]
     if transitive:
         capped = transitive[:max_items]
         sb.append(f"**Also transitively affected ({len(transitive)}):** "

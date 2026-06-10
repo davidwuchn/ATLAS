@@ -106,6 +106,9 @@ services:
       - ATLAS_LENS_URL=http://geometric-lens:8099
       - ATLAS_SANDBOX_URL=http://sandbox:8020
       - ATLAS_MODEL_NAME=${ATLAS_MODEL_NAME:-Qwen3.5-9B-Q6_K}
+      # Structural call-graph reasoning (#39, experimental, default off). Read by
+      # call_graph_enabled() inside this process, so it must be forwarded here.
+      - ATLAS_CALL_GRAPH=${ATLAS_CALL_GRAPH:-0}
     ports:
       - "${ATLAS_V3_PORT:-8070}:8070"
     depends_on:

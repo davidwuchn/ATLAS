@@ -183,12 +183,16 @@ not just whose imports survive.
 **Goal:** when the user names a symbol, inject its graph neighborhood.
 
 - `graph/context.py` `symbol_neighborhood`: a symbol's callers, callees, impact
-  set, and defining files. Wired into the `/internal/symbol_index` endpoint as
+  set, and defining files. v3-service attaches it to `/internal/symbol_index` as
   an additive `graph` field (the `matched`/`skipped` shape is unchanged), gated
-  by `ATLAS_CALL_GRAPH`.
-- Tests in `test_graph_context.py`.
-- **Exit (met):** naming a symbol surfaces its structurally related code. The
-  fewer-exploration-turns claim needs the live L6 measurement.
+  by `ATLAS_CALL_GRAPH`, building the project graph once per request.
+- The proxy consumes it end to end: `symbolIndexResult.Graph` (`proxy/symbol_index.go`)
+  parses the field and `formatGraphNeighborhood` folds the callers/callees into
+  the injected `[system note]` context in `agent.go`. (A review caught this as
+  initially half-wired — produced but discarded — and it's now consumed.)
+- Tests: `test_graph_context.py` + Go `symbol_index_test.go` (parse + format).
+- **Exit (met):** naming a symbol injects its definitions plus its structural
+  neighborhood. The fewer-exploration-turns claim needs the live L6 measurement.
 
 ### Phase 4 — Tier enrichment (#39 point 2, low priority) — ◑ signal shipped
 **Goal:** optional graph signals in tier classification.

@@ -60,6 +60,11 @@ class Datalog:
                 hpred, hterms = head
                 rel = self.facts.setdefault(hpred, set())
                 for binding in self._join(body, {}):
+                    # Skip if a head variable is unbound by the body (an unsafe
+                    # rule) rather than raising — keeps the public engine robust
+                    # against caller-supplied rules. The built-in rules are safe.
+                    if any(isinstance(t, Var) and t.name not in binding for t in hterms):
+                        continue
                     htuple = tuple(self._subst(t, binding) for t in hterms)
                     if htuple not in rel:
                         rel.add(htuple)

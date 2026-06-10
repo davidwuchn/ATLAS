@@ -67,3 +67,11 @@ class TestSymbolNeighborhood:
         nb = graph.symbol_neighborhood(PROJECT, "nope")
         assert nb["callers"] == [] and nb["callees"] == [] and nb["impact"] == []
         assert nb["defined_in"] == []
+
+    def test_prebuilt_graph_reused(self):
+        # Passing a prebuilt graph avoids rebuilding per symbol and gives the
+        # same result as building internally.
+        g = graph.build_graph(PROJECT)
+        a = graph.symbol_neighborhood(PROJECT, "load", graph=g)
+        b = graph.symbol_neighborhood(PROJECT, "load")
+        assert a == b

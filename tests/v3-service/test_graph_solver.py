@@ -50,6 +50,16 @@ class TestDatalogEngine:
         assert ("a", "d") in pairs and ("a", "c") in pairs and ("b", "d") in pairs
         assert ("d", "a") not in pairs
 
+    def test_unsafe_rule_does_not_crash(self):
+        # A rule with a head variable not bound by the body is unsafe; run()
+        # must skip it rather than raise KeyError (public-API robustness).
+        dl = Datalog()
+        dl.add_fact("calls", "a", "b")
+        x, y = Var("X"), Var("Y")
+        dl.add_rule(("p", [x, y]), [("calls", [x])])  # Y unbound
+        dl.run()  # must not raise
+        assert dl.facts.get("p", set()) == set()
+
     def test_query_bindings(self):
         dl = Datalog()
         dl.add_fact("calls", "main", "helper")

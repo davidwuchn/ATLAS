@@ -3179,11 +3179,14 @@ class V3Handler(BaseHTTPRequestHandler):
         # snippets alone. Additive: the "matched"/"skipped" shape is unchanged,
         # so flag-off callers see exactly today's response.
         try:
-            from graph import call_graph_enabled, symbol_neighborhood
+            from graph import call_graph_enabled, symbol_neighborhood, build_graph
             if call_graph_enabled() and result.get("matched"):
+                # Build the project graph ONCE, then neighborhood each matched
+                # symbol against it (not once per symbol).
+                g = build_graph(file_map)
                 related = []
                 for m in result["matched"]:
-                    nb = symbol_neighborhood(file_map, m["name"])
+                    nb = symbol_neighborhood(file_map, m["name"], graph=g)
                     if nb["callers"] or nb["callees"] or nb["impact"]:
                         related.append(nb)
                 if related:
