@@ -8,6 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 # Copy benchmark modules (V3 pipeline depends on them)
 COPY benchmark/ /app/benchmark/
 COPY v3-service/main.py /app/main.py
+# Structural call-graph reasoning (issue #39): tree-sitter-backed call graph.
+# Pure stdlib + the tree-sitter grammars installed below; no extra deps.
+COPY v3-service/graph/ /app/graph/
 
 # Install Python deps
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu

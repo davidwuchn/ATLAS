@@ -1317,6 +1317,44 @@ class V3PipelineService:
                 )
             passing = kept
 
+        # ===== CALL-GRAPH VETO (issue #39, Phase 1) =====
+        # Deepens the structural veto using the import graph: reject a candidate
+        # whose direct calls don't resolve to a real, in-scope definition (local,
+        # builtin, imported, or supplied by a resolved wildcard) — not merely
+        # "some project file defines that name." Catches broken cross-file
+        # references the shipped veto accepts. Flag-gated by ATLAS_CALL_GRAPH;
+        # conservative — stays lenient on opaque wildcards and never empties the
+        # candidate set (a fully-failing set falls through intact to repair).
+        if passing and files and file_path:
+            try:
+                from graph import call_graph_enabled, unresolved_calls
+                _cg_on = call_graph_enabled()
+            except Exception:
+                _cg_on = False
+            if _cg_on:
+                cg_kept = []
+                for c in passing:
+                    try:
+                        res = unresolved_calls(
+                            file_path, c.get("code", ""), files,
+                            builtins=set(PY_BUILTINS), strict=True)
+                    except Exception as cge:
+                        print(f"  [call_graph] veto skipped for cand {c.get('index')}: {cge}",
+                              flush=True)
+                        cg_kept.append(c)
+                        continue
+                    if res.get("ok") and res.get("unresolved"):
+                        emit("call_graph_veto",
+                             f"Candidate {c.get('index')} has unresolved call(s): "
+                             f"{', '.join(res['unresolved'][:3])}",
+                             index=c.get("index"), unresolved=res["unresolved"][:5])
+                        print(f"  [call_graph] vetoed cand {c.get('index')} — "
+                              f"unresolved: {res['unresolved'][:5]}", flush=True)
+                        continue
+                    cg_kept.append(c)
+                if cg_kept:  # only prune when at least one candidate survives
+                    passing = cg_kept
+
         # ===== CANDIDATE SELECTION =====
         if passing:
             # S* tiebreaking if multiple passing candidates
@@ -2788,6 +2826,8 @@ class V3Handler(BaseHTTPRequestHandler):
             self._handle_cyclomatic_complexity()
         elif self.path == "/internal/symbol_index":
             self._handle_symbol_index()
+        elif self.path == "/internal/call_graph":
+            self._handle_call_graph()
         elif self.path == "/health":
             self._json_response(200, {"status": "ok"})
         else:
@@ -3126,6 +3166,69 @@ class V3Handler(BaseHTTPRequestHandler):
             flush=True,
         )
         self._json_response(200, result)
+
+    def _handle_call_graph(self):
+        """POST /internal/call_graph — structural call-graph query (issue #39).
+
+        Builds (cached) a project call graph from the supplied files and runs a
+        native analysis on it. No solver; O(V+E) traversal.
+
+        Request:
+            {"file_map": {"app.py": "...", "pkg/util.py": "..."},
+             "analysis": "callers" | "callees" | "reachability" | "path" |
+                         "impact" | "cycles" | "dead-code" | "entry-points" | "facts",
+             "target": "<name>",        # callers/callees/impact
+             "from": "<name>", "to": "<name>",   # reachability/path
+             "entry_points": ["main"]}  # dead-code (optional)
+        Response:
+            {"ok": true, "analysis": "...", "result": <analysis result>}
+            or {"ok": false, "error": "..."}
+
+        Gated by ATLAS_CALL_GRAPH; returns ok=false when the flag is off so the
+        feature stays inert until enabled.
+        """
+        content_len = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(content_len) or b"{}")
+        except json.JSONDecodeError as e:
+            self._json_response(400, {"ok": False, "error": f"invalid JSON body: {e}"})
+            return
+
+        try:
+            from graph import (
+                build_graph, run_analysis, graph_to_prolog, call_graph_enabled,
+            )
+        except Exception as e:  # pragma: no cover - import guard
+            self._json_response(200, {"ok": False, "error": f"graph package unavailable: {e}"})
+            return
+
+        if not call_graph_enabled():
+            self._json_response(200, {"ok": False, "error": "ATLAS_CALL_GRAPH disabled"})
+            return
+
+        file_map = body.get("file_map") or {}
+        analysis = body.get("analysis", "facts")
+        try:
+            g = build_graph(file_map)
+            if analysis == "facts":
+                result = graph_to_prolog(g, entry_points=body.get("entry_points"))
+            else:
+                result = run_analysis(
+                    g, analysis,
+                    target=body.get("target"),
+                    frm=body.get("from"),
+                    to=body.get("to"),
+                    entry_points=body.get("entry_points"),
+                )
+        except ValueError as e:
+            self._json_response(400, {"ok": False, "error": str(e)})
+            return
+        except Exception as e:
+            self._json_response(200, {"ok": False, "error": f"call_graph failed: {e}"})
+            return
+
+        print(f"  [call_graph] {len(file_map)} files, analysis={analysis} → ok", flush=True)
+        self._json_response(200, {"ok": True, "analysis": analysis, "result": result})
 
     def _handle_cyclomatic_complexity(self):
         """POST /internal/cyclomatic_complexity — McCabe CC for tier classification.
