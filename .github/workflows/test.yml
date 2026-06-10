@@ -71,7 +71,7 @@ jobs:
           # tree-sitter grammars for the #39 call-graph extraction tests under
           # tests/v3-service/ (they skip cleanly if absent, but CI should run
           # them). Pre-built wheels, no build toolchain needed.
-          pip install tree_sitter tree_sitter_python
+          pip install tree_sitter tree_sitter_python tree_sitter_javascript
 
       - name: pytest
         run: |

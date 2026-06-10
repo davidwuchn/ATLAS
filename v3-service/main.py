@@ -1438,7 +1438,19 @@ class V3PipelineService:
         if failing:
             failing_func = _failing_function_from_stderr(failing[0].error_output)
             if failing_func and files:
-                chain_context_block = call_chain_context(files, failing_func)
+                # Phase 2 (#39 point 3): when the call graph is enabled, build a
+                # multi-hop reachability slice (entry-point path, transitive
+                # impact, callees) instead of the 1-hop callers/callees block.
+                # Falls back to the shipped builder on flag-off or any failure.
+                chain_context_block = ""
+                try:
+                    from graph import call_graph_enabled as _cg_on, repair_context as _cg_repair
+                    if _cg_on():
+                        chain_context_block = _cg_repair(files, failing_func)
+                except Exception as cge:
+                    print(f"  [phase3] graph repair-context skipped: {cge}", flush=True)
+                if not chain_context_block:
+                    chain_context_block = call_chain_context(files, failing_func)
                 if chain_context_block:
                     emit("call_chain_context",
                          f"Built call-chain for failing `{failing_func}`",
@@ -3160,6 +3172,25 @@ class V3Handler(BaseHTTPRequestHandler):
         n_matched = len(result.get("matched", []))
         n_skipped = len(result.get("skipped", []))
         n_files = len(file_map)
+
+        # Phase 3 (#39 point 4): when the call graph is enabled, attach each
+        # matched symbol's graph neighborhood (callers / callees / impact) so
+        # the proxy can inject structurally related code instead of name-matched
+        # snippets alone. Additive: the "matched"/"skipped" shape is unchanged,
+        # so flag-off callers see exactly today's response.
+        try:
+            from graph import call_graph_enabled, symbol_neighborhood
+            if call_graph_enabled() and result.get("matched"):
+                related = []
+                for m in result["matched"]:
+                    nb = symbol_neighborhood(file_map, m["name"])
+                    if nb["callers"] or nb["callees"] or nb["impact"]:
+                        related.append(nb)
+                if related:
+                    result["graph"] = related
+        except Exception as cge:
+            print(f"  [symbol_index] graph neighborhood skipped: {cge}", flush=True)
+
         print(
             f"  [symbol_index] {n_files} files, {len(symbols)} candidates → "
             f"matched={n_matched} skipped={n_skipped}",
@@ -3197,6 +3228,7 @@ class V3Handler(BaseHTTPRequestHandler):
         try:
             from graph import (
                 build_graph, run_analysis, graph_to_prolog, call_graph_enabled,
+                reachable_pairs,
             )
         except Exception as e:  # pragma: no cover - import guard
             self._json_response(200, {"ok": False, "error": f"graph package unavailable: {e}"})
@@ -3211,7 +3243,13 @@ class V3Handler(BaseHTTPRequestHandler):
         try:
             g = build_graph(file_map)
             if analysis == "facts":
+                # Prolog facts + rules for an external solver (chiasmus_verify / SWI).
                 result = graph_to_prolog(g, entry_points=body.get("entry_points"))
+            elif analysis == "closure":
+                # Phase 5: the transitive reaches/2 relation via the in-process
+                # Datalog engine — a relation the native single-pair API doesn't
+                # expose directly. Returned as [from, to] pairs.
+                result = [list(p) for p in reachable_pairs(g)]
             else:
                 result = run_analysis(
                     g, analysis,

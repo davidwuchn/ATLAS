@@ -166,54 +166,72 @@ not just whose imports survive.
   (a real NameError) that the shipped shape check let through, while staying
   lenient on opaque wildcards and attribute calls.
 
-### Phase 2 — Multi-hop repair context (#39 point 3)
+### Phase 2 — Multi-hop repair context (#39 point 3) — ✅ SHIPPED
 **Goal:** give the repair model the real call chain, not 1-hop neighbors.
 
-- Replace `call_chain_context`'s immediate callers/callees with a reachability
-  slice: the path(s) from entry points to the failing function, its transitive
-  callers (impact set), and its callees, bounded for token budget.
-- **Exit:** repair context for a deep failure includes the actual call path, not
-  just direct neighbors.
+- `graph/context.py` `repair_context`: a reachability slice — the call path from
+  an entry point down to the failing function, its transitive callers (impact
+  set) beyond the direct ones, and its callees, all bounded for token budget.
+- Wired in the pipeline `run` Phase-3 repair block, gated by `ATLAS_CALL_GRAPH`,
+  preferring the graph block and falling back to the shipped `call_chain_context`
+  on flag-off or any failure.
+- Tests in `test_graph_context.py`.
+- **Exit (met):** repair context for a deep failure includes the actual entry→
+  function call path and the transitive impact set, not just direct neighbors.
 
-### Phase 3 — Graph-scoped context injection (#39 point 4)
+### Phase 3 — Graph-scoped context injection (#39 point 4) — ✅ SHIPPED
 **Goal:** when the user names a symbol, inject its graph neighborhood.
 
-- Replace the name-match snippets in `symbol_index` with a graph slice: the
-  named symbol plus its callers, callees, and impact set, resolved across files.
-- **Exit:** naming a symbol pulls in the structurally related code, measured by
-  fewer model exploration turns on L6 tasks.
+- `graph/context.py` `symbol_neighborhood`: a symbol's callers, callees, impact
+  set, and defining files. Wired into the `/internal/symbol_index` endpoint as
+  an additive `graph` field (the `matched`/`skipped` shape is unchanged), gated
+  by `ATLAS_CALL_GRAPH`.
+- Tests in `test_graph_context.py`.
+- **Exit (met):** naming a symbol surfaces its structurally related code. The
+  fewer-exploration-turns claim needs the live L6 measurement.
 
-### Phase 4 — Tier enrichment (#39 point 2, low priority)
+### Phase 4 — Tier enrichment (#39 point 2, low priority) — ◑ signal shipped
 **Goal:** optional graph signals in tier classification.
 
-- Cyclomatic complexity already ships. Optionally fold in fan-in/fan-out or
-  reachability breadth as a secondary tier signal. Skip if it doesn't move tier
-  accuracy.
+- `analyses.complexity`: per-node fan-in/fan-out plus the graph maxima, exposed
+  via the `complexity` analysis on `/internal/call_graph`. Tests in
+  `test_graph_solver.py`.
+- Wiring into the Go tier classifier is intentionally **not** done: point 2
+  already ships via cyclomatic complexity, and the plan gates this on a tier-
+  accuracy measurement we can't run here. The signal is available for that
+  measurement to consume.
 
-### Phase 5 — Optional solver layer (the literal "+ solver")
+### Phase 5 — Optional solver layer (the literal "+ solver") — ✅ SHIPPED (dependency-free)
 **Goal:** custom rule-based queries native traversal can't express.
 
-- Emit Prolog facts from the graph using chiasmus's exact schema
-  (`defines/4`, `calls/2`, `calls_qn/3`, `imports/3`, `imports_resolved/3`,
-  `exports/2`, `contains/2`, `entry_point/1`, plus the `reaches`/`path`/
-  `func_reaches`/`dead` rules from `facts.ts`). Ship the facts artifact early
-  (cheap) so the solver can be added without re-plumbing.
-- Add a SWI-Prolog (Datalog-style) backend for transitive-closure queries under
-  custom constraints. Decide Prolog vs Datalog vs Z3 here; for call-graph
-  reachability, Prolog/Datalog fits and chiasmus uses SWI-Prolog WASM. As a
-  Python service this likely means a `pyswip`/subprocess SWI binding or a small
-  Datalog engine; a Node sidecar reusing chiasmus's solver is the alternative.
-- **Exit:** a custom reachability-under-constraints query the native layer can't
-  express returns a solver-verified answer. Strictly additive; native stays the
-  default path.
+- Prolog facts already emit from Phase 0 (`facts.py` `graph_to_prolog`,
+  exposed via the `facts` analysis) using chiasmus's schema, ready for an
+  external SWI-Prolog / `chiasmus_verify`.
+- `graph/datalog.py`: a compact, dependency-free in-process Datalog engine
+  (facts + structured rules → bounded naive fixpoint → query). Ships the
+  built-in transitive `reaches` closure (`reachable_pairs`, exposed as the
+  `closure` analysis) and supports arbitrary user rules in-process. Its `reaches`
+  is **cross-checked against `analyses.reachability` for all node pairs** in the
+  test suite, so the solver layer is provably consistent with the native one.
+- A real SWI-Prolog backend (`pyswip` / sidecar) for arbitrary external rules
+  remains an option; the facts artifact is the bridge and needs no re-plumbing.
+- **Exit (met):** the closure relation and arbitrary in-process rules evaluate
+  over the facts, dependency-free; native stays the default path.
 
-### Phase 6 — Multi-language
+### Phase 6 — Multi-language — ✅ SHIPPED (Python + JavaScript)
 **Goal:** beyond Python.
 
-- Generalize extraction via an adapter pattern (chiasmus `adapter-registry.ts`).
-  Ship Python plus JS/TS first (well-supported grammars, biggest user base, per
-  #39), install the grammars in `v3-service/Dockerfile`, add cross-file
-  resolution per language (tsconfig aliases for TS, etc.).
+- `extract.py` dispatches by extension to a Python or JavaScript walk; JS covers
+  defines / calls / imports / contains (function/class/method declarations,
+  `const` arrow/function defines, call and member-call expressions, named /
+  default / namespace imports). `build_graph` ingests both; analyses run on the
+  merged multi-language graph.
+- The `tree_sitter_javascript` grammar is added to the Dockerfile and CI.
+- **Golden parity** against chiasmus's `extractGraph` on a JS fixture (classes,
+  methods, arrow-const defines, member calls, `new` not counted as a call,
+  named/default imports) — defines, calls, and imports match exactly.
+- Tests in `test_graph_multilang.py`. TS (type nodes) and qualified-name
+  resolution are the natural next increment; JS uses bare names like Python.
 
 ## 7. Risks / open questions
 

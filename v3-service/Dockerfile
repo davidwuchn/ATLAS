@@ -21,7 +21,8 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 RUN pip install --no-cache-dir \
         tree_sitter \
         tree_sitter_python \
-        tree_sitter_html
+        tree_sitter_html \
+        tree_sitter_javascript
 
 EXPOSE 8070
 
