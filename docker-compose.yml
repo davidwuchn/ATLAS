@@ -221,6 +221,12 @@ services:
       # blind message count, so a just-read file isn't dropped.
       - ATLAS_CTX_SIZE=${ATLAS_CTX_SIZE:-131072}
       - ATLAS_PARALLEL_SLOTS=${ATLAS_PARALLEL_SLOTS:-4}
+      # Redundant-read short-circuit: when "1" (default), a re-read of an
+      # unchanged file already in context returns a compact pointer instead
+      # of re-injecting the file. Set "0" to always serve the full re-read
+      # (useful for weak models that lean on re-reads as extra reasoning
+      # passes).
+      - ATLAS_DEDUP_READS=${ATLAS_DEDUP_READS:-1}
       # PC-192: opt-in host execution for run_command. Set to "host"
       # to bypass the sandbox container and run verifications on the
       # host (works when proxy runs locally, not in Docker — Docker

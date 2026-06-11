@@ -821,9 +821,17 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				}
 			}
 
-			// Execute tool
+			// Execute tool. A re-read of an unchanged file already in
+			// context is served from a compact pointer instead of
+			// re-injecting + re-encoding the whole file (see
+			// redundantReadShortCircuit).
 			startTime := time.Now()
-			result := executeToolCall(parsed.Name, parsed.Args, ctx)
+			result := redundantReadShortCircuit(parsed.Name, parsed.Args, ctx)
+			if result == nil {
+				result = executeToolCall(parsed.Name, parsed.Args, ctx)
+			} else {
+				log.Printf("[agent] turn=%d short-circuited redundant read (already in context, unchanged)", turn)
+			}
 			elapsed := time.Since(startTime)
 
 			// On failure, log the error so it shows up in `docker compose
@@ -1258,35 +1266,47 @@ func stepExclusions(ctx *AgentContext) ([]string, string) {
 	return nil, ""
 }
 
-// eraseLlamaSlot clears llama.cpp's KV slot 0 to give the next chat
+// eraseLlamaSlot clears llama.cpp's KV slots to give the next chat
 // completion a fresh prefix. See PC-045. Errors are logged and
 // swallowed — slot erase is a best-effort isolation step, not a
 // correctness requirement.
+//
+// All slots are erased, not just slot 0. With --parallel > 1 and prompt
+// caching on, llama-server picks a slot per request by prefix match /
+// LRU, so a new session can land on slot 1..N-1. If only slot 0 were
+// cleared, those other slots would still hold a prior session's KV and
+// reuse it — the exact cross-session bleed PC-045 set out to prevent.
 func eraseLlamaSlot(ctx *AgentContext) {
 	llamaURL := envOr("ATLAS_LLAMA_URL", ctx.InferenceURL)
-	endpoint := llamaURL + "/slots/0?action=erase"
 
 	reqCtx := ctx.Ctx
 	if reqCtx == nil {
 		reqCtx = context.Background()
 	}
-	req, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, nil)
-	if err != nil {
-		log.Printf("[PC-045] erase slot: build request failed: %v", err)
-		return
-	}
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[PC-045] erase slot: request failed: %v (this is fine — slot is now stale, will be re-encoded on next call)", err)
-		return
+
+	erased := 0
+	slots := parallelSlots()
+	for id := 0; id < slots; id++ {
+		endpoint := fmt.Sprintf("%s/slots/%d?action=erase", llamaURL, id)
+		req, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, nil)
+		if err != nil {
+			log.Printf("[PC-045] erase slot %d: build request failed: %v", id, err)
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("[PC-045] erase slot %d: request failed: %v (continuing — slot is stale, will re-encode)", id, err)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[PC-045] erase slot %d: status %d (continuing — first turn re-encodes prefix)", id, resp.StatusCode)
+			continue
+		}
+		erased++
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[PC-045] erase slot: status %d (continuing — first turn will re-encode prefix from scratch)", resp.StatusCode)
-		return
-	}
-	log.Printf("[PC-045] erased llama slot 0 — fresh KV cache for this session")
+	log.Printf("[PC-045] erased %d/%d llama slots — fresh KV cache for this session", erased, slots)
 }
 
 // pollPromptProgress emits llm_prompt_progress events at 250ms cadence
@@ -1904,24 +1924,50 @@ func estTokens(content string) int {
 // for the response. Model-agnostic: keys off the context the deploy gives,
 // not the model identity. Falls back to a safe default when env is absent.
 func conversationTokenBudget() int {
-	ctx := 131072
+	ctxSize := 131072
 	if v := envOr("ATLAS_CTX_SIZE", ""); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
-			ctx = n
+			ctxSize = n
 		}
 	}
+	perSlot := ctxSize / parallelSlots()
+	budget := perSlot * 65 / 100 // leave ~35% of the slot for the response
+	if budget < 4000 {
+		budget = 4000 // floor: tiny-context deploys still keep a usable window
+	}
+	// Absolute ceiling. A coding agent's working set — the task, the file
+	// under edit, and the last few tool results — fits comfortably in this.
+	// Past it the conversation is accumulating stale tool output (repeated
+	// failed run_commands, superseded reads) that doesn't help the model and
+	// actively hurts: it re-feeds the model its own flailing, and on
+	// sliding-window-attention models (e.g. Gemma) llama.cpp can't reuse the
+	// KV cache, so every turn re-encodes the *entire* prompt — a big history
+	// is paid in full on every single turn. Keying off the working-set size,
+	// not the model, keeps this model-agnostic. Override with
+	// ATLAS_AGENT_HISTORY_BUDGET for deployments that genuinely need more.
+	ceiling := 14000
+	if v := envOr("ATLAS_AGENT_HISTORY_BUDGET", ""); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			ceiling = n
+		}
+	}
+	if budget > ceiling {
+		budget = ceiling
+	}
+	return budget
+}
+
+// parallelSlots returns the llama-server --parallel slot count for this
+// deployment (ATLAS_PARALLEL_SLOTS), defaulting to 4 to match the
+// entrypoint. Used both for KV-slot isolation and per-slot context math.
+func parallelSlots() int {
 	slots := 4
 	if v := envOr("ATLAS_PARALLEL_SLOTS", ""); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
 			slots = n
 		}
 	}
-	perSlot := ctx / slots
-	budget := perSlot * 65 / 100 // leave ~35% of the slot for the response
-	if budget < 4000 {
-		budget = 4000 // floor: tiny-context deploys still keep a usable window
-	}
-	return budget
+	return slots
 }
 
 // budgetedKeepLast returns how many trailing messages trimMessages should

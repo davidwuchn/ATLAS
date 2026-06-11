@@ -1051,6 +1051,16 @@ func editFileTool() *ToolDef {
 				return &ToolResult{Success: false, Error: rejection}, nil
 			}
 
+			// No-op guard — same rationale as ast_edit's. new_str identical
+			// to old_str (or a replacement that leaves the file unchanged)
+			// must not report success: the model believes the fix landed
+			// and moves on while the bug is still on disk.
+			if newContent == content {
+				log.Printf("[edit_file] no-op edit rejected for %s — file content unchanged", input.Path)
+				return &ToolResult{Success: false, Error: "edit_file: new_str is identical to old_str — nothing was changed and the bug is still there. " +
+					"Look at the current code again and emit a new_str that actually differs from the existing code."}, nil
+			}
+
 			// Route through V3 pipeline when the file warrants it. The
 			// gate now mirrors write_file (file-tier only, no request-tier
 			// AND-gate) — having two separate tier checks meant V3 only
@@ -1072,7 +1082,8 @@ func editFileTool() *ToolDef {
 				fileTier = newTier
 			}
 			// GH #39 point 2: CC enrichment — same as write_file's path.
-			if cc, ok := cyclomaticComplexity(ctx, input.Path, newContent); ok {
+			cc, ccOK := cyclomaticComplexity(ctx, input.Path, newContent)
+			if ccOK {
 				if refined := refineTierWithCC(fileTier, cc); refined != fileTier {
 					log.Printf("[edit_file] %s tier %s→%s via cc=%d", input.Path, fileTier, refined, cc)
 					fileTier = refined
@@ -1081,7 +1092,7 @@ func editFileTool() *ToolDef {
 				}
 			}
 			v3Out := V3EditMetadata{}
-			if fileTier >= Tier2Medium && ctx.V3URL != "" && !ctx.BypassV3 {
+			if fileTier >= Tier2Medium && editWarrantsV3(newContent, cc, ccOK) && ctx.V3URL != "" && !ctx.BypassV3 {
 				log.Printf("[edit_file] V3 pipeline activating for %s (file_tier=%d, req_tier=%d)", input.Path, fileTier, ctx.Tier)
 				improved, meta, err := improveContentWithV3(path, newContent, ctx)
 				if err != nil {
@@ -1182,6 +1193,28 @@ func astEditTool() *ToolDef {
 				return nil, fmt.Errorf("cannot read %s: %w", input.Path, err)
 			}
 			source := string(data)
+
+			// Runaway-content guard. ast_edit replaces ONE node, so the
+			// replacement should be roughly node-sized. A reasoning-heavy
+			// model sometimes leaks its entire chain-of-thought into the
+			// content field instead of emitting just the new body — observed
+			// live: a 69KB "content" for a 3-line function, full of
+			// "# Wait, the user said..." commentary. That blob then ships to
+			// disk and, being huge, trips downstream size heuristics (it once
+			// re-triggered a 23-min V3 PlanSearch). Reject when the
+			// replacement is implausibly larger than the whole file: >4× the
+			// file and over an 8KB floor (so legit edits that grow a small
+			// file stay clear, and large-function edits in large files aren't
+			// touched). Steer the model to emit only the replacement node.
+			if len(input.Content) > 8000 && len(input.Content) > len(source)*4 {
+				log.Printf("[ast_edit] rejected runaway content for %s selector=%q: %d chars vs %d-byte file",
+					input.Path, input.Selector, len(input.Content), len(source))
+				return &ToolResult{Success: false, Error: fmt.Sprintf(
+					"ast_edit: replacement content is %d characters — far larger than the entire %d-byte file. "+
+						"You only need to provide the new body of the single node `%s` (just the function/class/element itself), "+
+						"not the whole file and not your reasoning. Re-emit ast_edit with content set to ONLY the replacement node.",
+					len(input.Content), len(source), input.Selector)}, nil
+			}
 
 			ctx.mu.Lock()
 			lastRead := ctx.FileReadTimes[path]
@@ -1296,6 +1329,21 @@ func astEditTool() *ToolDef {
 			// better, V3 wins; otherwise the AST-edited content passes
 			// through unchanged. Either way the answer is build-verified.
 			finalContent := astResp.NewContent
+
+			// No-op guard. A weak model frequently "fixes" a bug by
+			// re-emitting the node's existing (broken) code verbatim —
+			// observed live: ast_edit function:add with content identical
+			// to the buggy body, twice in one batch. Reporting success on
+			// a no-op tells the model the fix landed when nothing changed;
+			// it then moves on to verification, fails, and can't work out
+			// why. Fail loudly instead so the model re-derives the edit.
+			if finalContent == source {
+				log.Printf("[ast_edit] no-op edit rejected for %s selector=%q — replacement identical to existing code", input.Path, input.Selector)
+				return &ToolResult{Success: false, Error: fmt.Sprintf(
+					"ast_edit: your replacement for `%s` is IDENTICAL to the code already in the file — nothing was changed and the bug is still there. "+
+						"Look at the current code again and emit a replacement that actually differs (for a swapped-operator bug, the operator itself must change).",
+					input.Selector)}, nil
+			}
 			v3Out := V3EditMetadata{}
 			oldTier := classifyFileTier(input.Path, source) // pre-edit content
 			newTier := classifyFileTier(input.Path, finalContent)
@@ -1303,14 +1351,15 @@ func astEditTool() *ToolDef {
 			if newTier > fileTier {
 				fileTier = newTier
 			}
-			if cc, ok := cyclomaticComplexity(ctx, input.Path, finalContent); ok {
+			cc, ccOK := cyclomaticComplexity(ctx, input.Path, finalContent)
+			if ccOK {
 				if refined := refineTierWithCC(fileTier, cc); refined != fileTier {
 					log.Printf("[ast_edit] %s tier %s→%s via cc=%d", input.Path, fileTier, refined, cc)
 					fileTier = refined
 				}
 			}
-			if fileTier >= Tier2Medium && ctx.V3URL != "" && !ctx.BypassV3 {
-				log.Printf("[ast_edit] V3 pipeline activating for %s (oldTier=%d newTier=%d max=%d, req_tier=%d) post-AST-edit", input.Path, oldTier, newTier, fileTier, ctx.Tier)
+			if fileTier >= Tier2Medium && editWarrantsV3(finalContent, cc, ccOK) && ctx.V3URL != "" && !ctx.BypassV3 {
+				log.Printf("[ast_edit] V3 pipeline activating for %s (oldTier=%d newTier=%d max=%d, req_tier=%d, cc=%d) post-AST-edit", input.Path, oldTier, newTier, fileTier, ctx.Tier, cc)
 				improved, meta, err := improveContentWithV3(path, finalContent, ctx)
 				if err != nil {
 					log.Printf("[ast_edit] V3 failed: %v — falling back to AST-edited content", err)
@@ -2131,6 +2180,31 @@ func refineTierWithCC(base Tier, cc int) Tier {
 	return base
 }
 
+// editWarrantsV3 decides whether a successful, surgical edit should be run
+// back through the V3 whole-file pipeline. edit_file and ast_edit both
+// produce content the model specified precisely — an exact old→new string
+// swap, or a named tree-sitter node replacement — so the result is already
+// what was asked for. V3's PlanSearch generates and build-verifies whole-
+// file alternatives: worthwhile when a file is large or genuinely complex,
+// but on a small, low-complexity file it spends minutes (single-threaded
+// v3-service, reasoning-heavy models) only to reproduce the same edit. The
+// file tier alone can't distinguish these — a 9-line calc.py classifies
+// Tier2 like a 400-line module — so gate additionally on the resulting
+// file's complexity and size. Trivial edits then apply instantly while V3
+// still engages where a file is substantial enough to benefit. Keys off
+// the code, not the model, so it stays model-agnostic.
+//
+// ccOK is false when complexity couldn't be measured (non-code or parser
+// miss); fall back to a line-count bar so we neither always-run nor
+// never-run on unmeasurable files.
+func editWarrantsV3(content string, cc int, ccOK bool) bool {
+	if ccOK && cc >= 8 {
+		return true
+	}
+	lines := strings.Count(content, "\n") + 1
+	return lines >= 80
+}
+
 // hasLogicIndicators checks if content contains signs of real application logic
 // that would benefit from V3 pipeline's diverse candidate generation.
 func hasLogicIndicators(content string) bool {
@@ -2211,6 +2285,55 @@ func resolvePath(path, workingDir string) string {
 // user pastes "/home/isaac/snake/app.py" into a prompt — the model
 // copies the absolute path, the proxy rewrites it to /workspace/app.py,
 // and read_file actually finds the file.
+// redundantReadShortCircuit returns a compact synthetic result when the
+// model asks to read a file it has ALREADY read this session and the
+// content on disk is unchanged. A weak model frequently re-reads the same
+// file several times before acting; each re-read re-injects the full file
+// into the conversation and — on sliding-window-attention models that
+// can't reuse llama.cpp's KV cache — forces a full re-encode of the whole
+// prompt, costing tens of seconds for zero new information. Serving a
+// short "already in context, act now" pointer keeps the working set small
+// and steers toward the edit.
+//
+// Only whole-file reads short-circuit (a paged read with offset/limit is
+// the model deliberately fetching a different span, so let it through),
+// and only when the on-disk content byte-matches what was already shown
+// (so a re-read after an edit still returns the new content). Returns nil
+// to mean "no short-circuit — execute the read normally." Model-agnostic:
+// keys off whether this exact content was already served, not the model.
+func redundantReadShortCircuit(name string, args json.RawMessage, ctx *AgentContext) *ToolResult {
+	if name != "read_file" {
+		return nil
+	}
+	if envOr("ATLAS_DEDUP_READS", "1") == "0" {
+		return nil
+	}
+	var input ReadFileInput
+	if err := json.Unmarshal(args, &input); err != nil {
+		return nil
+	}
+	if input.Offset != nil || input.Limit != nil || strings.TrimSpace(input.Path) == "" {
+		return nil
+	}
+	path := resolveAgentPath(ctx, input.Path)
+	prev, ok := ctx.FilesRead[path]
+	if !ok {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != prev {
+		return nil // changed or unreadable — let the real read run
+	}
+	out := ReadFileOutput{
+		Content: fmt.Sprintf("(You already read %s earlier in this session and it has not changed — its full content is above in the conversation. Do not read it again. Make your edit now with ast_edit or edit_file.)", input.Path),
+		TotalLines: strings.Count(prev, "\n") + 1,
+		StartLine:  1,
+		EndLine:    strings.Count(prev, "\n") + 1,
+	}
+	b, _ := json.Marshal(out)
+	return &ToolResult{Success: true, Data: b}
+}
+
 func resolveAgentPath(ctx *AgentContext, path string) string {
 	// PC-198 — defensive prefix strip. The local model frequently
 	// emits `workspace/app.py` (no leading slash) when it means the

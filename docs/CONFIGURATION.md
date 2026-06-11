@@ -27,6 +27,8 @@ These variables are read by `docker-compose.yml` and control host-side port mapp
 | `ATLAS_MODEL_NAME` | `Qwen3.5-9B-Q6_K` | Model identifier used in API responses |
 | `ATLAS_CTX_SIZE` | `131072` | Context window size in tokens, TOTAL across all parallel slots (mapped to `CONTEXT_LENGTH` inside the llama container). Sized per model + GPU by `atlas tier fit --write`. |
 | `ATLAS_PARALLEL_SLOTS` | `4` | Concurrent request slots. llama-server divides `ATLAS_CTX_SIZE` by this for per-slot context. |
+| `ATLAS_AGENT_HISTORY_BUDGET` | `14000` | Ceiling (tokens) on the agent loop's kept conversation history. The effective budget is `min(65% of per-slot context, this ceiling)`. The default bounds per-turn re-encode cost on sliding-window-attention models, where llama.cpp re-encodes the whole history every turn. |
+| `ATLAS_DEDUP_READS` | `1` | When `1`, a whole-file re-read of an unchanged file already in context returns a compact pointer instead of the full content. Set `0` to always serve the full re-read. |
 | `ATLAS_KV_TYPE_K` | `f16` | KV-cache K quantization (`f16`, `q8_0`, `q4_0`). Set by `atlas tier fit --write`. |
 | `ATLAS_KV_TYPE_V` | `f16` | KV-cache V quantization. Set by `atlas tier fit --write`. |
 | `ATLAS_UBATCH` | `1024` | llama-server micro-batch size (`-ub`). Drives the compute-buffer VRAM cost (~ubatch × n_embd × 280 bytes) — the term that OOMs first on tight cards. Set by `atlas tier fit --write`. |
