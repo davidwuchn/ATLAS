@@ -1008,7 +1008,16 @@ func editFileTool() *ToolDef {
 						"(e.g. `function:NAME`, `class:NAME`, `<body>`) and the " +
 						"new content — no old_str needed, so a near-miss can't fail it."
 				}
-				return nil, fmt.Errorf("string to replace not found in file. old_str must match the file byte-for-byte (whitespace and quotes included).%s\nSearched for: %s", astAlt, truncateStr(input.OldStr, 200))
+				// Ground the retry in the file's REAL content. A small model
+				// frequently writes old_str from its memory of the file
+				// rather than the file itself (observed: old_str
+				// `item = items[id + 1]` for a file whose actual line is
+				// `return jsonify(items[item_id + 1])`). Without an anchor it
+				// gives up on the surgical edit and rewrites the whole node
+				// from the same faulty memory. Quoting the closest actual
+				// line gives it real bytes to copy into the next attempt.
+				hint := closestLineHint(content, input.OldStr)
+				return nil, fmt.Errorf("string to replace not found in file. old_str must match the file byte-for-byte (whitespace and quotes included).%s%s\nSearched for: %s", astAlt, hint, truncateStr(input.OldStr, 200))
 			}
 
 			// Check uniqueness
@@ -1539,6 +1548,63 @@ func improveContentWithV3(path, content string, ctx *AgentContext) (string, V3Ed
 // non-whitespace content (would match any blank run). Content differences
 // beyond whitespace (renamed tokens, changed quotes) do NOT match — those
 // are semantic and must fail.
+// closestLineHint finds the file line most similar to the first
+// non-blank line of a missed old_str and formats it (with its line
+// number) for inclusion in the edit_file mismatch error. Similarity is
+// shared-token count — crude, but enough to map a from-memory paraphrase
+// like `item = items[id + 1]` onto the real
+// `return jsonify(items[item_id + 1])`. Returns "" when nothing clears a
+// minimal overlap bar (so unrelated guesses don't get a misleading
+// anchor).
+func closestLineHint(content, oldStr string) string {
+	var probe string
+	for _, l := range strings.Split(oldStr, "\n") {
+		if strings.TrimSpace(l) != "" {
+			probe = l
+			break
+		}
+	}
+	if probe == "" {
+		return ""
+	}
+	tokenize := func(s string) map[string]bool {
+		out := map[string]bool{}
+		for _, t := range strings.FieldsFunc(s, func(r rune) bool {
+			return !(r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+		}) {
+			out[t] = true
+		}
+		return out
+	}
+	probeToks := tokenize(probe)
+	if len(probeToks) == 0 {
+		return ""
+	}
+	bestScore, bestIdx := 0, -1
+	lines := strings.Split(content, "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		score := 0
+		for t := range tokenize(l) {
+			if probeToks[t] {
+				score++
+			}
+		}
+		if score > bestScore {
+			bestScore, bestIdx = score, i
+		}
+	}
+	// Require at least 2 shared identifiers and half the probe's tokens —
+	// below that the "closest" line is likely unrelated.
+	if bestIdx < 0 || bestScore < 2 || bestScore*2 < len(probeToks) {
+		return ""
+	}
+	return fmt.Sprintf("\nClosest actual line in the file (line %d): %s\nCopy real lines from the file into old_str — do not write them from memory.",
+		bestIdx+1, truncateStr(strings.TrimSpace(lines[bestIdx]), 160))
+}
+
 func findFuzzyLineMatch(content, oldStr string) (string, bool) {
 	fileLines := strings.Split(content, "\n")
 	oldLines := strings.Split(oldStr, "\n")
@@ -2318,10 +2384,19 @@ func redundantReadShortCircuit(name string, args json.RawMessage, ctx *AgentCont
 	path := resolveAgentPath(ctx, input.Path)
 	prev, ok := ctx.FilesRead[path]
 	if !ok {
+		// Diagnostic: a re-read that SHOULD have been cached but wasn't.
+		// Logged only when some other entry exists (first read of a file
+		// is the normal case and not worth a line).
+		if len(ctx.FilesRead) > 0 {
+			log.Printf("[read-dedup] no cache entry for %s (have %d entries) — serving real read", path, len(ctx.FilesRead))
+		}
 		return nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || string(data) != prev {
+		if err == nil {
+			log.Printf("[read-dedup] %s changed on disk since last read (%dB -> %dB) — serving real read", path, len(prev), len(data))
+		}
 		return nil // changed or unreadable — let the real read run
 	}
 	out := ReadFileOutput{

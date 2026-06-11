@@ -29,6 +29,7 @@ These variables are read by `docker-compose.yml` and control host-side port mapp
 | `ATLAS_PARALLEL_SLOTS` | `4` | Concurrent request slots. llama-server divides `ATLAS_CTX_SIZE` by this for per-slot context. |
 | `ATLAS_AGENT_HISTORY_BUDGET` | `14000` | Ceiling (tokens) on the agent loop's kept conversation history. The effective budget is `min(65% of per-slot context, this ceiling)`. The default bounds per-turn re-encode cost on sliding-window-attention models, where llama.cpp re-encodes the whole history every turn. |
 | `ATLAS_DEDUP_READS` | `1` | When `1`, a whole-file re-read of an unchanged file already in context returns a compact pointer instead of the full content. Set `0` to always serve the full re-read. |
+| `ATLAS_REASONING_BUDGET` | `6144` | Per-turn reasoning-token budget (estimated at 4 chars/token). When a generation accumulates this much `reasoning_content` without emitting any content tokens, the proxy cuts the stream and re-prompts ("emit your tool call now"). Bounds reasoning spirals — without it, `max_tokens` (32768) is the only cap and allows ~25 minutes of silent deliberation per turn. `0` disables. |
 | `ATLAS_KV_TYPE_K` | `f16` | KV-cache K quantization (`f16`, `q8_0`, `q4_0`). Set by `atlas tier fit --write`. |
 | `ATLAS_KV_TYPE_V` | `f16` | KV-cache V quantization. Set by `atlas tier fit --write`. |
 | `ATLAS_UBATCH` | `1024` | llama-server micro-batch size (`-ub`). Drives the compute-buffer VRAM cost (~ubatch × n_embd × 280 bytes) — the term that OOMs first on tight cards. Set by `atlas tier fit --write`. |

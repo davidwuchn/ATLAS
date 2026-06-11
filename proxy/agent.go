@@ -1594,7 +1594,26 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 		reasoningBuf   strings.Builder
 		totalTokens    int
 		firstTokenSent bool
+		reasoningCut   bool
 	)
+
+	// Per-turn reasoning budget. A reasoning-heavy model can spiral for
+	// tens of thousands of tokens inside ONE generation (observed: a
+	// 14-minute, ~17K-token deliberation over a 24-line file that ended
+	// with no tool call) — max_tokens (32768) is the only bound and it
+	// allows ~25 minutes of silence. When accumulated reasoning passes
+	// the budget we stop reading; closing the response body cancels the
+	// slot server-side. The post-loop recovery path then either extracts
+	// a tool_call already present in the reasoning, or returns empty so
+	// the caller's standard re-prompt ("emit your tool call now") fires.
+	// Token-estimate at 4 chars/token; ATLAS_REASONING_BUDGET (tokens)
+	// overrides, 0 disables. Keyed off stream state, not model identity.
+	reasoningBudgetChars := 6144 * 4
+	if v := envOr("ATLAS_REASONING_BUDGET", ""); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			reasoningBudgetChars = n * 4
+		}
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	// Default scanner buffer is 64KB which is fine per line, but bump
@@ -1655,6 +1674,9 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 				ctx.Stream("reasoning_token", map[string]interface{}{
 					"text": c.Delta.ReasoningContent,
 				})
+				if reasoningBudgetChars > 0 && reasoningBuf.Len() > reasoningBudgetChars && contentBuf.Len() == 0 {
+					reasoningCut = true
+				}
 			}
 			if c.Delta.Content == "" {
 				continue
@@ -1673,6 +1695,14 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 		}
 		if chunk.Usage != nil && chunk.Usage.TotalTokens > 0 {
 			totalTokens = chunk.Usage.TotalTokens
+		}
+		if reasoningCut {
+			log.Printf("[agent] reasoning budget exceeded (%d chars, ~%d tokens) with no content emitted — cutting the stream and re-prompting",
+				reasoningBuf.Len(), reasoningBuf.Len()/4)
+			ctx.Stream("reasoning_budget_cut", map[string]interface{}{
+				"reasoning_chars": reasoningBuf.Len(),
+			})
+			break
 		}
 	}
 	if err := scanner.Err(); err != nil {
