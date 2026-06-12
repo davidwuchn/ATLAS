@@ -2758,6 +2758,27 @@ def ast_edit(path: str, source_text: str, selector: str, content: str) -> dict:
     except UnicodeDecodeError as e:
         return {"success": False, "error": f"replacement produced invalid utf-8: {e}"}
 
+    # Post-splice syntax gate (Python). Tree-sitter is error-tolerant: it
+    # happily locates the node and splices in replacement content that is
+    # not valid Python — observed live: a model emitted `item["id""]` and
+    # `&quot;`-escaped quotes, ast_edit reported success, and a previously
+    # runnable Flask app shipped with a SyntaxError. Refuse to hand back a
+    # broken file; return the parse error so the model can fix its quoting
+    # on the retry. Keyed off file type, not the model.
+    if language == "python":
+        try:
+            compile(new_content, path, "exec")
+        except SyntaxError as e:
+            snippet = (e.text or "").strip()
+            return {"success": False, "error": (
+                f"ast_edit: the replacement makes {path} invalid Python — "
+                f"SyntaxError at line {e.lineno}: {e.msg}"
+                + (f" (offending line: {snippet})" if snippet else "")
+                + '. The file was NOT modified. Check your quoting (no doubled '
+                  'quotes like ["id""], no escaped \\" inside the content, no '
+                  'HTML entities like &quot;) and re-emit the full node.'
+            )}
+
     return {
         "success": True,
         "language": language,
@@ -2790,6 +2811,8 @@ class V3Handler(BaseHTTPRequestHandler):
             self._handle_symbol_index()
         elif self.path == "/internal/outline":
             self._handle_outline()
+        elif self.path == "/internal/pycheck":
+            self._handle_pycheck()
         elif self.path == "/health":
             self._json_response(200, {"status": "ok"})
         else:
@@ -3128,6 +3151,34 @@ class V3Handler(BaseHTTPRequestHandler):
             flush=True,
         )
         self._json_response(200, result)
+
+    def _handle_pycheck(self):
+        """POST /internal/pycheck — does this Python source parse?
+
+        Request:  {"path": "app.py", "source": "<file text>"}
+        Response: {"ok": bool, "error": "...", "line": N}
+
+        Used by the proxy's edit_file path to refuse writing a .py file the
+        edit would break — the same gate ast_edit applies post-splice. Pure
+        compile() check, no execution.
+        """
+        content_len = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(content_len) or b"{}")
+        except json.JSONDecodeError as e:
+            self._json_response(400, {"ok": False, "error": f"invalid JSON body: {e}"})
+            return
+        path = body.get("path", "") or "<edit>"
+        source = body.get("source", "") or ""
+        try:
+            compile(source, path, "exec")
+            self._json_response(200, {"ok": True})
+        except SyntaxError as e:
+            snippet = (e.text or "").strip()
+            msg = f"SyntaxError at line {e.lineno}: {e.msg}"
+            if snippet:
+                msg += f" (offending line: {snippet})"
+            self._json_response(200, {"ok": False, "error": msg, "line": e.lineno or 0})
 
     def _handle_outline(self):
         """POST /internal/outline — list a file's top-level functions/classes.
