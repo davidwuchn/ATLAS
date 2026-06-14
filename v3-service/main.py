@@ -2702,6 +2702,15 @@ def ast_edit(path: str, source_text: str, selector: str, content: str) -> dict:
     if not _AST_EDIT_AVAILABLE:
         return {"success": False, "error": "ast_edit unavailable: tree-sitter not installed in this v3-service build"}
 
+    # Empty-content guard (defense-in-depth; the proxy also checks). Splicing
+    # empty content over a node deletes it — a model that omits `content`
+    # would silently remove the function instead of fixing it.
+    if not content.strip():
+        return {"success": False, "error": (
+            f"ast_edit: content is empty — that would DELETE '{selector}', not edit it. "
+            f"Provide the full replacement body of the node."
+        )}
+
     language, lang_obj = _ast_language_for_path(path)
     if not language:
         return {"success": False, "error": (

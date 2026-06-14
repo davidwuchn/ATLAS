@@ -1218,6 +1218,24 @@ func astEditTool() *ToolDef {
 			}
 			source := string(data)
 
+			// Empty-content guard. Replacing a node with nothing is a
+			// deletion, not an edit — observed live: Qwen called ast_edit
+			// with the `content` field omitted entirely, which spliced an
+			// empty string over `function:add` and silently deleted it
+			// (calc.py lost both functions while __main__ still called
+			// them). It passes the syntax gate (the file still parses) and
+			// the no-op guard (the content did change), so nothing else
+			// catches it. Refuse it and steer: an edit needs a replacement
+			// body; an intentional removal is delete_file's job.
+			if strings.TrimSpace(input.Content) == "" {
+				log.Printf("[ast_edit] rejected empty content for %s selector=%q — would delete the node", input.Path, input.Selector)
+				return &ToolResult{Success: false, Error: fmt.Sprintf(
+					"ast_edit: content is empty — that would DELETE `%s`, not fix it. "+
+						"Provide the full replacement body of the node (e.g. the corrected function definition). "+
+						"If you truly mean to remove code, use delete_file on the whole file instead.",
+					input.Selector)}, nil
+			}
+
 			// Runaway-content guard. ast_edit replaces ONE node, so the
 			// replacement should be roughly node-sized. A reasoning-heavy
 			// model sometimes leaks its entire chain-of-thought into the
