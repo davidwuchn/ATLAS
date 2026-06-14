@@ -134,12 +134,20 @@ func tracebackSteer(ctx *AgentContext, output string) string {
 	}
 
 	// Best-effort: read the offending line so the steer can quote real bytes.
+	// Also record the read: the steer hands the model this file's content, and
+	// the very next thing we want it to do is edit it — but edit_file/ast_edit
+	// require a prior read_file (the blind-edit guard). Without recording it,
+	// the model's correct directed edit bounces with "file not read yet," it
+	// loops, and gets stopped (the 2/3 variance). The harness HAS read the file
+	// to build this steer, so the edit is grounded, not blind.
 	exact := ""
-	if data, err := os.ReadFile(resolveAgentPath(ctx, file)); err == nil {
+	resolved := resolveAgentPath(ctx, file)
+	if data, err := os.ReadFile(resolved); err == nil {
 		lines := strings.Split(string(data), "\n")
 		if lineNo >= 1 && lineNo <= len(lines) {
 			exact = strings.TrimSpace(lines[lineNo-1])
 		}
+		ctx.RecordFileRead(resolved, string(data))
 	}
 
 	rel := file
@@ -154,16 +162,22 @@ func tracebackSteer(ctx *AgentContext, output string) string {
 		sb.WriteString(" (" + exc + ")")
 	}
 	sb.WriteString(". ")
+	// Directed, MINIMAL-edit instruction. The model fixes the right function
+	// reliably now, but rewriting the whole node via ast_edit makes it typo
+	// the unchanged parts (observed: items -> Items, a fresh NameError it then
+	// repeats). When we have the exact line, tell it to change ONLY that line
+	// with edit_file: old_str = the verbatim line (so the match is exact and
+	// the model isn't recalling it), new_str = the same line with only the bug
+	// fixed. That shrinks the model's text generation to a one-line delta and
+	// removes the collateral-typo surface.
 	if exact != "" {
-		fmt.Fprintf(&sb, "That line is: `%s`. ", exact)
-	}
-	// Directed instruction — name the one function to change; forbid the
-	// failure modes we keep seeing (edit elsewhere, hardcode the value).
-	if fn != "<module>" && fn != "" {
-		fmt.Fprintf(&sb, "Fix the bug in `%s` — use ast_edit with selector `function:%s`. ", fn, fn)
+		fmt.Fprintf(&sb, "The buggy line is EXACTLY:\n%s\n", exact)
+		sb.WriteString("Fix it with a MINIMAL edit_file: set old_str to that exact line (copy it character-for-character) and new_str to the SAME line with only the bug corrected. ")
+		sb.WriteString("Change nothing else on the line — do not rename variables, do not re-case anything, do not rewrite the whole function, and do not hardcode a value. Change only what causes the error.")
+	} else if fn != "<module>" && fn != "" {
+		fmt.Fprintf(&sb, "Fix the bug in `%s` with ast_edit selector `function:%s`. Keep every identifier exactly as it already appears (same spelling and case) — change only the buggy logic. Do not edit other functions or hardcode a value.", fn, fn)
 	} else {
-		fmt.Fprintf(&sb, "Fix the code at line %d. ", lineNo)
+		fmt.Fprintf(&sb, "Fix the code at line %d — change only the buggy logic, keep all other identifiers exactly as written.", lineNo)
 	}
-	sb.WriteString("Do NOT edit any other function and do NOT hardcode a value to make the symptom go away — fix the actual logic at this location.")
 	return sb.String()
 }
