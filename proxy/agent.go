@@ -1652,6 +1652,8 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 		totalTokens    int
 		firstTokenSent bool
 		reasoningCut   bool
+		contentLoopCut bool
+		lastLoopCheck  int
 	)
 
 	// Per-turn reasoning budget. A reasoning-heavy model can spiral for
@@ -1749,6 +1751,19 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 			ctx.Stream("llm_token", map[string]interface{}{
 				"text": c.Delta.Content,
 			})
+			// Content-loop cut. Gemma sometimes states the right answer then
+			// spirals on self-doubt in the CONTENT stream ("...the first line
+			// is X. Wait, I can't see the output. I'll just say X. Wait, I
+			// can't..." repeating) — the reasoning budget doesn't catch it
+			// (that's content, not reasoning_content), so it ran to max_tokens.
+			// Detect a verbatim repeating tail and cut. Checked periodically
+			// to keep it O(n) overall.
+			if !contentLoopCut && contentBuf.Len() > 600 && contentBuf.Len()-lastLoopCheck > 200 {
+				lastLoopCheck = contentBuf.Len()
+				if isLoopingTail(contentBuf.String()) {
+					contentLoopCut = true
+				}
+			}
 		}
 		if chunk.Usage != nil && chunk.Usage.TotalTokens > 0 {
 			totalTokens = chunk.Usage.TotalTokens
@@ -1759,6 +1774,11 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 			ctx.Stream("reasoning_budget_cut", map[string]interface{}{
 				"reasoning_chars": reasoningBuf.Len(),
 			})
+			break
+		}
+		if contentLoopCut {
+			log.Printf("[agent] content loop detected (%d chars) — model repeating itself; cutting the stream", contentBuf.Len())
+			ctx.Stream("content_loop_cut", map[string]interface{}{"chars": contentBuf.Len()})
 			break
 		}
 	}
@@ -2041,6 +2061,23 @@ func conversationTokenBudget() int {
 		}
 	}
 	return budget
+}
+
+// isLoopingTail reports whether the content stream has degenerated into a
+// verbatim repeating phrase — the signature of a model spiraling on the same
+// sentence ("...the first line is X. Wait, I can't see the output. I'll just
+// say X. Wait, I can't see..."). Takes a chunk from the tail and counts its
+// occurrences; 3+ verbatim repeats is a loop a real response never produces.
+func isLoopingTail(s string) bool {
+	const probe = 48
+	if len(s) < probe*3 {
+		return false
+	}
+	tail := s[len(s)-probe:]
+	if strings.TrimSpace(tail) == "" {
+		return false
+	}
+	return strings.Count(s, tail) >= 3
 }
 
 // agentMaxTokens is the per-turn generation ceiling (ATLAS_MAX_TOKENS,
