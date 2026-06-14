@@ -1,9 +1,51 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// The case-typo loop: ran `pip install -r Requirements.txt` while the real
+// file is `requirements.txt`. The steer must name the actual file.
+func TestMissingFileSteerCaseMismatch(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &AgentContext{WorkingDir: dir}
+	out := "ERROR: Could not open requirements file: [Errno 2] No such file or directory: 'Requirements.txt'\n"
+	steer := missingFileSteer(ctx, out)
+	if !strings.Contains(steer, "requirements.txt") || !strings.Contains(steer, "case") {
+		t.Errorf("expected case-mismatch steer naming requirements.txt, got: %q", steer)
+	}
+}
+
+// A genuinely absent file (no case-variant) must NOT produce a steer — we
+// never invent an anchor for a file that doesn't exist.
+func TestMissingFileSteerNoVariant(t *testing.T) {
+	dir := t.TempDir()
+	ctx := &AgentContext{WorkingDir: dir}
+	out := "cat: nope.txt: No such file or directory\n"
+	if s := missingFileSteer(ctx, out); s != "" {
+		t.Errorf("expected no steer when no case-variant exists, got: %q", s)
+	}
+}
+
+// Shell-style error (filename before the colon) is also recognized.
+func TestMissingFileSteerShellShape(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.py"), []byte("print(1)\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &AgentContext{WorkingDir: dir}
+	out := "python: Main.py: No such file or directory\n"
+	steer := missingFileSteer(ctx, out)
+	if !strings.Contains(steer, "main.py") {
+		t.Errorf("expected steer naming main.py, got: %q", steer)
+	}
+}
 
 func TestTracebackSteerNamesFixSite(t *testing.T) {
 	ctx := &AgentContext{WorkingDir: "/workspace"}
@@ -23,6 +65,19 @@ func TestTracebackSteerNoTraceback(t *testing.T) {
 	ctx := &AgentContext{WorkingDir: "/workspace"}
 	if s := tracebackSteer(ctx, "Total inventory value: $237\n"); s != "" {
 		t.Errorf("expected empty steer for non-traceback output, got: %s", s)
+	}
+}
+
+// Environment errors (missing package) aren't code-localization targets —
+// steering/banning would loop on an unfixable import.
+func TestTracebackSteerSkipsModuleNotFound(t *testing.T) {
+	ctx := &AgentContext{WorkingDir: "/workspace"}
+	out := "Traceback (most recent call last):\n" +
+		"  File \"/workspace/snake_game.py\", line 1, in <module>\n" +
+		"    import pygame\n" +
+		"ModuleNotFoundError: No module named 'pygame'\n"
+	if s := tracebackSteer(ctx, out); s != "" {
+		t.Errorf("should not steer on ModuleNotFoundError, got: %s", s)
 	}
 }
 

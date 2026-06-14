@@ -1081,6 +1081,12 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				if steer := tracebackSteer(ctx, scan); steer != "" {
 					ctx.Messages = append(ctx.Messages, AgentMessage{Role: "user", Content: steer})
 					log.Printf("[agent] traceback localization: steered to fix site")
+				} else if steer := missingFileSteer(ctx, scan); steer != "" {
+					// Case-typo recovery: command referenced a file whose name
+					// differs only in case from a real workspace file. Name the
+					// correct file so the model stops re-running the wrong name.
+					ctx.Messages = append(ctx.Messages, AgentMessage{Role: "user", Content: steer})
+					log.Printf("[agent] missing-file localization: steered to correct case")
 				}
 			}
 

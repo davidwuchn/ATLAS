@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,6 +22,61 @@ import (
 // the localization — no LLM reasoning required to read it.
 
 var reTraceFrame = regexp.MustCompile(`File "([^"]+)", line (\d+), in (\S+)`)
+
+// Patterns that name a file the OS couldn't open. Two shapes cover the
+// common cases: Python/pip quote the name ("No such file or directory:
+// 'Requirements.txt'"); shell tools put it before the colon ("cat:
+// Requirements.txt: No such file or directory").
+var (
+	reMissingQuoted = regexp.MustCompile(`No such file or directory:?\s*'([^']+)'`)
+	reMissingShell  = regexp.MustCompile(`(?m)([^\s:'"]+): No such file or directory`)
+)
+
+// missingFileSteer catches the case-typo loop: the model writes
+// `requirements.txt` then runs `pip install -r Requirements.txt`, gets "No
+// such file or directory", and re-runs the identical wrong command (observed:
+// 5× until the repetition breaker fired). When the missing name differs from a
+// real workspace file only by case, the harness names the correct file so the
+// model re-runs with the right name instead of looping. Returns "" when there
+// is no missing-file error or no case-variant exists (so we never invent an
+// anchor for a genuinely absent file).
+func missingFileSteer(ctx *AgentContext, output string) string {
+	if !strings.Contains(output, "No such file or directory") {
+		return ""
+	}
+	// Collect candidate missing names from both error shapes.
+	var cands []string
+	for _, m := range reMissingQuoted.FindAllStringSubmatch(output, -1) {
+		cands = append(cands, m[1])
+	}
+	for _, m := range reMissingShell.FindAllStringSubmatch(output, -1) {
+		cands = append(cands, m[1])
+	}
+	seen := map[string]bool{}
+	for _, cand := range cands {
+		if cand == "" || seen[cand] {
+			continue
+		}
+		seen[cand] = true
+		base := filepath.Base(cand)
+		dir := filepath.Dir(cand) // "." when cand is a bare filename
+		entries, err := os.ReadDir(resolveAgentPath(ctx, dir))
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if name != base && strings.EqualFold(name, base) {
+				actual := name
+				if dir != "." && dir != "" {
+					actual = filepath.Join(dir, name)
+				}
+				return fmt.Sprintf("[system note]: There is no file `%s`, but `%s` exists — the name differs only in case. Re-run the command with the exact name `%s`. Do not re-run it unchanged.", cand, actual, actual)
+			}
+		}
+	}
+	return ""
+}
 
 // tracebackExclusion is the grammar-level counterpart to runBlockAfterTraceback.
 // If the most recent tool result is a crashed run with a parseable traceback,
@@ -131,6 +187,16 @@ func tracebackSteer(ctx *AgentContext, output string) string {
 			continue
 		}
 		exc = strings.TrimSpace(l)
+	}
+
+	// Don't fire on environment errors. A missing top-level package
+	// (ModuleNotFoundError: pygame) is not a code bug the model can fix by
+	// editing the function the frame points at — the "fix" is installing the
+	// dependency. Steering + banning runs here would force the model to "edit"
+	// an unfixable import and loop. Let the normal flow handle it (the model
+	// can choose to install or switch libraries).
+	if strings.HasPrefix(exc, "ModuleNotFoundError") || strings.HasPrefix(exc, "ImportError") {
+		return ""
 	}
 
 	// Best-effort: read the offending line so the steer can quote real bytes.

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -901,7 +902,11 @@ func writeFileWithV3(path, baselineContent string, ctx *AgentContext) (*ToolResu
 	if err != nil {
 		// Fallback to direct write if V3 service unavailable
 		log.Printf("[write_file] V3 failed: %s — falling back to direct write", err)
-		ctx.Stream("text", map[string]string{"content": fmt.Sprintf("  \u2514\u2500 V3 unavailable, writing directly")})
+		msg := "  \u2514\u2500 V3 unavailable, writing directly"
+		if errors.Is(err, context.DeadlineExceeded) {
+			msg = fmt.Sprintf("  \u2514\u2500 V3 exceeded %s cap, writing your version", v3CallTimeout())
+		}
+		ctx.Stream("text", map[string]string{"content": msg})
 		return writeFileDirect(path, baselineContent)
 	}
 

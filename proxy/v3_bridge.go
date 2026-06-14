@@ -7,8 +7,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 )
+
+// v3CallTimeout is the interactive wall-clock cap for a single V3 pipeline
+// call. Default 180s bounds the long-tail repair stall that left a user
+// waiting 11 min, while comfortably covering typical 1–3 min runs. Set
+// ATLAS_V3_TIMEOUT to a second count to override, or 0 to disable the cap
+// (restores the May-10 uncapped behavior for offline bench runs).
+func v3CallTimeout() time.Duration {
+	if v := os.Getenv("ATLAS_V3_TIMEOUT"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 180 * time.Second
+}
 
 // ---------------------------------------------------------------------------
 // V3 Bridge — Go ↔ Python V3 service communication
@@ -40,15 +57,30 @@ func callV3GenerateStreaming(reqCtx context.Context, v3URL string, req V3Generat
 	if reqCtx == nil {
 		reqCtx = context.Background()
 	}
+
+	// Interactive wall-clock cap. The May-10 design ran V3 uncapped so a
+	// >15-min Phase-3 repair could finish; that's right for an offline bench
+	// run but unshippable interactively — observed an 11-min stall on a
+	// 103-line write_file while a user waited. Cap the agent path so a runaway
+	// pipeline falls back to the model's own content (all three callers treat
+	// a V3 error as "write the baseline") instead of hanging the session. The
+	// model's content is already syntax-gated, so the fallback is safe.
+	// ATLAS_V3_TIMEOUT (seconds) overrides; 0 restores the uncapped behavior
+	// for bench/offline use.
+	if d := v3CallTimeout(); d > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(reqCtx, d)
+		defer cancel()
+	}
+
 	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create V3 request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// No call timeout by design (May 10 2026): V3 pipelines can run >15 min
-	// on Phase 3 repair and a hard cap killed working runs. Abort is
-	// user-driven via the bound request context above.
+	// Abort is user-driven via the bound request context, plus the
+	// interactive deadline applied above.
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)
 	if err != nil {

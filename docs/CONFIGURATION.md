@@ -175,6 +175,7 @@ The Go proxy that runs the agent loop, routes tool calls, and orchestrates the A
 | `ATLAS_LENS_URL` | `http://localhost:8099` | Geometric Lens scoring endpoint |
 | `ATLAS_SANDBOX_URL` | `http://localhost:30820` | Sandbox code execution endpoint |
 | `ATLAS_V3_URL` | `http://localhost:8070` | V3 Pipeline service endpoint |
+| `ATLAS_V3_TIMEOUT` | `180` | Interactive wall-clock cap (seconds) on a single V3 pipeline call from the agent path (`write_file` / `edit_file`). On timeout the proxy falls back to the model's own content (already syntax-gated) instead of hanging the session — bounds the long-tail Phase-3 repair stall (observed ~11 min on a 103-line write). Set `0` to disable the cap (restores the uncapped behavior for offline bench runs). Source: `proxy/v3_bridge.go:v3CallTimeout`. |
 | `ATLAS_MODEL_NAME` | `Qwen3.5-9B-Q6_K` | Model name for API responses |
 | `ATLAS_KEEP_LLAMA_WARM` | `1` | Set to `0` to disable the keep-warm goroutine that pings llama-server every 45s with a 1-token completion. Keeping warm avoids the cold-start path that fires after 1-2 min idle (see ISSUES.md PC-035). Disable for CPU-only or tightly power-budgeted setups. |
 | `ATLAS_FRESH_SLOT_PER_SESSION` | `1` | Set to `0` to disable per-session llama.cpp KV-slot erase. With it enabled (default), the proxy POSTs `/slots/0?action=erase` at the start of each agent loop invocation, giving each turn a clean cache. Adds ~1-2s to the first turn but prevents cross-session token-state leakage (e.g. filenames hallucinated from prior sessions). See ISSUES.md PC-045. |
