@@ -230,6 +230,10 @@ services:
       # (useful for weak models that lean on re-reads as extra reasoning
       # passes).
       - ATLAS_DEDUP_READS=${ATLAS_DEDUP_READS:-1}
+      # Structural call-graph reasoning (#39). The proxy reads this to decide
+      # whether to attach the intra-file call graph to read_file/outline_file
+      # output; v3-service reads the same flag (line above) to compute it.
+      - ATLAS_CALL_GRAPH=${ATLAS_CALL_GRAPH:-0}
       # PC-192: opt-in host execution for run_command. Set to "host"
       # to bypass the sandbox container and run verifications on the
       # host (works when proxy runs locally, not in Docker — Docker

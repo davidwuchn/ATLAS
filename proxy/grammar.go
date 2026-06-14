@@ -207,7 +207,12 @@ func buildGBNFGrammarForTools(excluded []string) string {
 	sb.WriteString("json-value ::= json-string | json-number | json-object | json-array | \"true\" | \"false\" | \"null\"\n")
 	sb.WriteString(`json-string ::= "\"" json-char* "\""` + "\n")
 	sb.WriteString(`json-char ::= [^"\\] | "\\" ["\\/bfnrt] | "\\u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]` + "\n")
-	sb.WriteString("json-number ::= \"-\"? [0-9]+ (\".\" [0-9]+)? ([eE] [\"+\\-\"]? [0-9]+)?\n")
+	// Exponent sign is an optional + or -. The class must be [-+] (literal
+	// minus, no escape) — the previous [\"+\\-\"] emitted `["+\-"]`, whose
+	// `\-` is an illegal GBNF escape and crashed grammar parsing whenever this
+	// rule was included (surfaced when banning run tools left a number-bearing
+	// tool in the enum). GBNF needs no quotes inside a character class.
+	sb.WriteString("json-number ::= \"-\"? [0-9]+ (\".\" [0-9]+)? ([eE] [-+]? [0-9]+)?\n")
 	sb.WriteString("ws ::= [ \\t\\n]*\n")
 
 	return sb.String()

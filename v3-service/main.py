@@ -2793,9 +2793,26 @@ def ast_edit(path: str, source_text: str, selector: str, content: str) -> dict:
 
     targets = captures.get(target_cap, [])
     if len(targets) == 0:
+        # Ground the retry in the file's REAL symbols. A weak model
+        # hallucinates selectors for functions that don't exist
+        # (observed: function:get_inventory_count, function:calculate_inventory
+        # against a file that defines item_subtotal / total_value). The lens
+        # can't catch this — the replacement text is plausible code; the
+        # TARGET is the problem. Listing what's actually defined turns a
+        # dead-end "verify the symbol exists" into an actionable retry.
+        available = ""
+        if language == "python":
+            try:
+                names = []
+                for name, kind, _sb, _eb in _symbol_index_for_python_source(source_text.encode("utf-8")):
+                    names.append(f"{kind}:{name}")
+                if names:
+                    available = " This file defines: " + ", ".join(names[:30]) + ". Use one of these exact selectors, or read the file to confirm."
+            except Exception:
+                available = ""
         return {"success": False, "error": (
-            f"selector '{selector}' matched 0 nodes in {path}. "
-            f"Verify the symbol exists — read the file first if unsure."
+            f"selector '{selector}' matched 0 nodes in {path} — that symbol does not exist in this file."
+            + (available or " Read the file first to see what's defined.")
         )}
     if len(targets) > 1:
         return {"success": False, "error": (
@@ -3344,6 +3361,17 @@ class V3Handler(BaseHTTPRequestHandler):
         Bodies are NOT returned — this is the cheap "what's in here" probe so
         the model can then read just the one function's line range instead of
         the whole file. .py only here; the proxy regex-falls-back for the rest.
+
+        When ATLAS_CALL_GRAPH is on, each symbol also carries its intra-file
+        call-graph neighborhood (`calls` / `called_by`). The outline is the
+        artifact the model inspects right before it decides WHICH symbol to
+        edit, so this is where structural context earns its keep: it lets the
+        model follow `total_value -> item_subtotal` to a callee-rooted bug
+        instead of editing the function where the symptom merely surfaces
+        (issue #39). Scoped to this one file — no project-wide scan — so it's
+        cheap and never misses the file in a large repo. Additive: the
+        symbols/supported shape is unchanged, so flag-off callers see exactly
+        today's response.
         """
         content_len = int(self.headers.get("Content-Length", 0))
         try:
@@ -3365,6 +3393,24 @@ class V3Handler(BaseHTTPRequestHandler):
                     "start_line": src[:sb_].count(b"\n") + 1,
                     "end_line": src[:eb].count(b"\n") + 1,
                 })
+
+        # Call-graph neighborhood (issue #39, flag-gated). Build the single-file
+        # graph once and attach callers/callees to each symbol the model can see.
+        if symbols:
+            try:
+                from graph import call_graph_enabled, symbol_neighborhood, build_graph
+                if call_graph_enabled():
+                    file_map = {path: source}
+                    g = build_graph(file_map)
+                    for s in symbols:
+                        nb = symbol_neighborhood(file_map, s["name"], graph=g)
+                        if nb["callees"]:
+                            s["calls"] = nb["callees"]
+                        if nb["callers"]:
+                            s["called_by"] = nb["callers"]
+            except Exception as cge:  # pragma: no cover - import/extract guard
+                print(f"  [outline] call-graph neighborhood skipped: {cge}", flush=True)
+
         self._json_response(200, {"symbols": symbols, "supported": supported})
 
     def _handle_cyclomatic_complexity(self):

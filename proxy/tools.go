@@ -202,6 +202,21 @@ func readFileTool() *ToolDef {
 			// sibling before generating a new file in the same dir.
 			patternReadTracker.add(path)
 
+			// Call-graph footer (issue #39, flag-gated). The model reads a
+			// file far more often than it outlines one, so attach the
+			// intra-file call edges to a .py read where the localization
+			// decision happens. Fire on any read that starts at the top of
+			// the file (start == 0) — that covers both a whole-file read and
+			// the model's common "offset:0, limit:N" first look; it computes
+			// the graph from the full file on disk regardless of the page
+			// shown, and skips mid-file pages so a model scrolling a big file
+			// doesn't get the footer repeated.
+			if start == 0 && strings.HasSuffix(input.Path, ".py") && callGraphEnabled() {
+				if footer := callGraphFooter(ctx, input.Path, string(data)); footer != "" {
+					content += footer
+				}
+			}
+
 			out := ReadFileOutput{
 				Content:    content,
 				TotalLines: totalLines,
@@ -277,14 +292,71 @@ func outlineFileTool() *ToolDef {
 			if len(syms) == 0 {
 				sb.WriteString("(no top-level functions/classes found — read_file to view it directly)\n")
 			}
+			hasGraph := false
 			for _, s := range syms {
 				fmt.Fprintf(&sb, "L%d-%d\t%s %s\n", s.StartLine, s.EndLine, s.Kind, s.Name)
+				if len(s.Calls) > 0 {
+					fmt.Fprintf(&sb, "\tcalls: %s\n", strings.Join(s.Calls, ", "))
+					hasGraph = true
+				}
+				if len(s.CalledBy) > 0 {
+					fmt.Fprintf(&sb, "\tcalled by: %s\n", strings.Join(s.CalledBy, ", "))
+					hasGraph = true
+				}
+			}
+			if hasGraph {
+				// Steer the model to use the structure for localization — the
+				// #39 point: a wrong value a function returns may come from a
+				// function it calls, not from the function itself.
+				sb.WriteString("\nNote: if a function returns a wrong value, the bug may be in a function it `calls`, not in the function itself — follow the call edges to the root cause before editing.\n")
 			}
 			out := OutlineOutput{Symbols: syms, Supported: len(syms) > 0}
 			_ = out
 			return &ToolResult{Success: true, Data: []byte(fmt.Sprintf("%q", sb.String()))}, nil
 		},
 	}
+}
+
+// callGraphEnabled mirrors v3-service's flag so the proxy can skip the extra
+// outline round-trip on the read_file path when the feature is off. Forwarded
+// to the proxy container via docker-compose (issue #39).
+func callGraphEnabled() bool {
+	v := strings.TrimSpace(os.Getenv("ATLAS_CALL_GRAPH"))
+	return v != "" && v != "0" && strings.ToLower(v) != "false"
+}
+
+// callGraphFooter renders a compact intra-file call-graph summary for a
+// whole-file read, reusing the same v3 outline (which carries calls/called_by
+// when ATLAS_CALL_GRAPH is on). Returns "" when there are no edges, so a file
+// with no internal calls doesn't get a noisy empty section.
+func callGraphFooter(ctx *AgentContext, path, source string) string {
+	syms, ok := outlineViaV3(ctx, path, source)
+	if !ok {
+		return ""
+	}
+	var sb strings.Builder
+	any := false
+	for _, s := range syms {
+		if len(s.Calls) == 0 && len(s.CalledBy) == 0 {
+			continue
+		}
+		if !any {
+			sb.WriteString("\n\n## Call graph (within this file)\n")
+			any = true
+		}
+		sb.WriteString("- " + s.Name)
+		if len(s.Calls) > 0 {
+			sb.WriteString(" calls: " + strings.Join(s.Calls, ", "))
+		}
+		if len(s.CalledBy) > 0 {
+			sb.WriteString("; called by: " + strings.Join(s.CalledBy, ", "))
+		}
+		sb.WriteString("\n")
+	}
+	if any {
+		sb.WriteString("If a function returns a wrong value, the bug may be in a function it calls — follow the edges to the root cause before editing.\n")
+	}
+	return sb.String()
 }
 
 // outlineViaV3 asks v3-service for a tree-sitter outline. Returns (nil,false)
@@ -2467,6 +2539,18 @@ func redundantReadShortCircuit(name string, args json.RawMessage, ctx *AgentCont
 		}
 		return nil // changed or unreadable — let the real read run
 	}
+	// CRITICAL: only short-circuit to a pointer if the content is STILL in
+	// the live conversation. After conversation trimming drops the original
+	// read, "its content is above" becomes a lie — the model has nothing,
+	// edits blind, and (if weak) hallucinates symbols/lines that aren't in
+	// the file. When the content has been trimmed out, return nil so the
+	// real read re-serves the full file. Verified failure mode: Gemma editing
+	// function:count_items / old_str="return len(items)" against a file
+	// containing neither, reasoning "I don't see the file content."
+	if !fileContentInContext(ctx, prev) {
+		log.Printf("[read-dedup] %s content was trimmed from context — re-serving full read", path)
+		return nil
+	}
 	out := ReadFileOutput{
 		Content: fmt.Sprintf("(You already read %s earlier in this session and it has not changed — its full content is above in the conversation. Do not read it again. Make your edit now with ast_edit or edit_file.)", input.Path),
 		TotalLines: strings.Count(prev, "\n") + 1,
@@ -2475,6 +2559,30 @@ func redundantReadShortCircuit(name string, args json.RawMessage, ctx *AgentCont
 	}
 	b, _ := json.Marshal(out)
 	return &ToolResult{Success: true, Data: b}
+}
+
+// fileContentInContext reports whether a file's content is still present in
+// the live (post-trim) conversation. Uses the file's longest line as a
+// distinctive probe — the read tool stores numbered lines, so the raw line
+// text is a substring of whatever's in context if the read survived trimming.
+// Conservative: an empty/whitespace file probes as "present" (nothing to lose).
+func fileContentInContext(ctx *AgentContext, content string) bool {
+	probe := ""
+	for _, l := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(l)
+		if len(t) > len(probe) {
+			probe = t
+		}
+	}
+	if len(probe) < 12 {
+		return true // too short to probe reliably; don't churn re-reads
+	}
+	for _, m := range ctx.Messages {
+		if strings.Contains(m.Content, probe) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveAgentPath(ctx *AgentContext, path string) string {

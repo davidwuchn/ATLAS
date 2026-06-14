@@ -152,6 +152,13 @@ type OutlineSymbol struct {
 	Kind      string `json:"kind"`
 	StartLine int    `json:"start_line"`
 	EndLine   int    `json:"end_line"`
+	// Intra-file call-graph neighborhood (issue #39, populated only when
+	// ATLAS_CALL_GRAPH is on in v3-service). Calls = functions this symbol
+	// invokes; CalledBy = functions that invoke it. Lets the model follow a
+	// symptom to its callee-rooted cause instead of editing where the
+	// symptom surfaces.
+	Calls    []string `json:"calls,omitempty"`
+	CalledBy []string `json:"called_by,omitempty"`
 }
 
 type OutlineOutput struct {

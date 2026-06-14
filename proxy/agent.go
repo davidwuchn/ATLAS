@@ -831,10 +831,17 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 			// redundantReadShortCircuit).
 			startTime := time.Now()
 			result := redundantReadShortCircuit(parsed.Name, parsed.Args, ctx)
+			if result != nil {
+				log.Printf("[agent] turn=%d short-circuited redundant read (already in context, unchanged)", turn)
+			}
+			if result == nil && (parsed.Name == "run_command" || parsed.Name == "run_background") {
+				if blk := runBlockAfterTraceback(ctx); blk != nil {
+					result = blk
+					log.Printf("[agent] turn=%d blocked re-run after traceback — forcing an edit first", turn)
+				}
+			}
 			if result == nil {
 				result = executeToolCall(parsed.Name, parsed.Args, ctx)
-			} else {
-				log.Printf("[agent] turn=%d short-circuited redundant read (already in context, unchanged)", turn)
 			}
 			elapsed := time.Since(startTime)
 
@@ -1051,6 +1058,32 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				})
 			}
 
+			// Option 3 (issue #39): traceback → directed edit. When a
+			// run_command surfaced a Python traceback, mechanically extract
+			// the fix site and hand the model a directed instruction ("fix
+			// function X here") instead of leaving it to localize — the step
+			// a weak model fails by hallucinating symbols / editing the wrong
+			// function. The stack frame IS the localization; no LLM reasoning
+			// needed to read it.
+			if !result.Success && (parsed.Name == "run_command" || parsed.Name == "run_background") {
+				// Scan the RAW stdout/stderr, not result.MarshalText() — the
+				// marshaled JSON escapes the quotes in `File "..."` frames, so
+				// the traceback regex wouldn't match.
+				var rc struct {
+					Stdout string `json:"stdout"`
+					Stderr string `json:"stderr"`
+				}
+				_ = json.Unmarshal(result.Data, &rc)
+				scan := rc.Stderr + "\n" + rc.Stdout
+				if scan == "\n" {
+					scan = result.Error
+				}
+				if steer := tracebackSteer(ctx, scan); steer != "" {
+					ctx.Messages = append(ctx.Messages, AgentMessage{Role: "user", Content: steer})
+					log.Printf("[agent] traceback localization: steered to fix site")
+				}
+			}
+
 			// PC-044: Trust V3-verified edits — strongly nudge toward done.
 			// When V3 ran the edit through its sandbox/probe pipeline and
 			// the result came back successful (V3Used && PhaseSolved
@@ -1174,6 +1207,19 @@ func buildStepRequest(ctx *AgentContext) ([]AgentMessage, string) {
 	// context after trim; per-turn injection makes the progress
 	// surface persistent without bloating history.
 	planReminder := buildPlanReminder(ctx)
+
+	// Traceback step-restriction (issue #39 / option 3): after a crash, ban the
+	// run tools so the model can't loop on re-running and is forced to edit the
+	// fix site the traceback names. Takes precedence over the write_file case.
+	if tbExcluded, tbNote := tracebackExclusion(ctx); len(tbExcluded) > 0 {
+		messages := append([]AgentMessage(nil), ctx.Messages...)
+		if planReminder != "" {
+			messages = append(messages, AgentMessage{Role: "user", Content: planReminder})
+		}
+		messages = append(messages, AgentMessage{Role: "user", Content: tbNote})
+		log.Printf("[agent] traceback step-restriction: banning run tools, forcing an edit")
+		return messages, buildGBNFGrammarForTools(tbExcluded)
+	}
 
 	excluded, ext := stepExclusions(ctx)
 	if len(excluded) == 0 {
@@ -1493,11 +1539,18 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 
 	llamaURL := envOr("ATLAS_LLAMA_URL", ctx.InferenceURL)
 
+	// Per-turn hard ceiling (agentMaxTokens, default 8192). 32768 let a
+	// rambling content blob run the full window (~18 min at the GPU's capped
+	// decode rate) — the runaway nothing else caught, since the reasoning
+	// budget only fires on reasoning-WITHOUT-content. An agent turn is a tool
+	// call (small) or a whole-file write_file (a few thousand tokens); 8192
+	// covers a ~600-line generation. Truncation recovery backstops the rare
+	// legit overflow. conversationTokenBudget reserves this same value.
 	reqBody := map[string]interface{}{
 		"model":       modelName,
 		"messages":    wireMessages,
 		"temperature": temperature,
-		"max_tokens":  32768,
+		"max_tokens":  agentMaxTokens(),
 		"stream":      true,
 		// Without include_usage, the final SSE chunk before [DONE] has no
 		// usage block, so we can't report total_tokens to the TUI.
@@ -1965,30 +2018,42 @@ func conversationTokenBudget() int {
 		}
 	}
 	perSlot := ctxSize / parallelSlots()
-	budget := perSlot * 65 / 100 // leave ~35% of the slot for the response
+	// Sliding window sized to the actual slot: reserve room for the model's
+	// reply (max_tokens) plus a margin for system-prompt growth and tokenizer
+	// slack, and give the REST of the slot to the conversation. The previous
+	// flat 14k cap was too aggressive — on a 32k slot it left ~10k unused AND
+	// dropped the file the model was editing, so weak models hallucinated
+	// symbols/lines they could no longer see. The active file is additionally
+	// pinned in trimMessages so it survives the window regardless. The
+	// model-agnostic re-encode cost (SWA models re-process the prompt each
+	// turn) is bounded by the slot itself; deploys that need it smaller can
+	// still set ATLAS_AGENT_HISTORY_BUDGET.
+	budget := perSlot - agentMaxTokens() - 2048
 	if budget < 4000 {
 		budget = 4000 // floor: tiny-context deploys still keep a usable window
 	}
-	// Absolute ceiling. A coding agent's working set — the task, the file
-	// under edit, and the last few tool results — fits comfortably in this.
-	// Past it the conversation is accumulating stale tool output (repeated
-	// failed run_commands, superseded reads) that doesn't help the model and
-	// actively hurts: it re-feeds the model its own flailing, and on
-	// sliding-window-attention models (e.g. Gemma) llama.cpp can't reuse the
-	// KV cache, so every turn re-encodes the *entire* prompt — a big history
-	// is paid in full on every single turn. Keying off the working-set size,
-	// not the model, keeps this model-agnostic. Override with
-	// ATLAS_AGENT_HISTORY_BUDGET for deployments that genuinely need more.
-	ceiling := 14000
+	// Optional hard ceiling — unset by default. Only set
+	// ATLAS_AGENT_HISTORY_BUDGET to bound per-turn re-encode cost below the
+	// slot capacity (trades retained context for faster turns on SWA models).
 	if v := envOr("ATLAS_AGENT_HISTORY_BUDGET", ""); v != "" {
-		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
-			ceiling = n
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 && n < budget {
+			budget = n
 		}
 	}
-	if budget > ceiling {
-		budget = ceiling
-	}
 	return budget
+}
+
+// agentMaxTokens is the per-turn generation ceiling (ATLAS_MAX_TOKENS,
+// default 8192). Shared by the LLM request and conversationTokenBudget so the
+// window and the reply reservation stay consistent.
+func agentMaxTokens() int {
+	maxTokens := 8192
+	if v := envOr("ATLAS_MAX_TOKENS", ""); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			maxTokens = n
+		}
+	}
+	return maxTokens
 }
 
 // parallelSlots returns the llama-server --parallel slot count for this
@@ -2054,11 +2119,38 @@ func trimMessages(msgs []AgentMessage, keepLast int) []AgentMessage {
 		}
 	}
 
+	// Pin the most-recent file-content tool result (read_file / outline_file)
+	// so the file the model is working on never gets trimmed out from under it.
+	// Without this, a long agent loop drops the file content, the model edits
+	// BLIND, and a weak model then hallucinates symbols and old_str that
+	// aren't in the file (observed live: ast_edit function:count_items and
+	// edit_file old_str="return len(items)" against a file containing neither,
+	// with the model literally reasoning "I don't see the file content"). The
+	// exploration-budget breaker compounds it by telling the model it "has
+	// full project context" when the content was already trimmed.
+	filePinIdx := -1
+	for i := len(msgs) - 1; i >= 1; i-- {
+		if msgs[i].Role == "tool" && (msgs[i].ToolName == "read_file" || msgs[i].ToolName == "outline_file") &&
+			!strings.Contains(msgs[i].Content, "You already read") { // skip dedup pointers — they carry no content
+			filePinIdx = i
+			break
+		}
+	}
+
 	tailStart := len(msgs) - keepLast
-	out := make([]AgentMessage, 0, keepLast+2)
+	out := make([]AgentMessage, 0, keepLast+3)
 	out = append(out, msgs[0])
 	if pinIdx >= 1 && pinIdx < tailStart {
 		out = append(out, msgs[pinIdx])
+	}
+	// Re-inject the pinned file content (as a user-role note so it survives
+	// templates that reject orphan tool messages) when it falls outside the
+	// kept tail.
+	if filePinIdx >= 1 && filePinIdx < tailStart && filePinIdx != pinIdx {
+		out = append(out, AgentMessage{
+			Role:    "user",
+			Content: "[system note]: current contents of the file you are editing (do not invent symbols or lines not shown here):\n" + msgs[filePinIdx].Content,
+		})
 	}
 	out = append(out, msgs[tailStart:]...)
 	return out
