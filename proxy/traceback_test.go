@@ -7,6 +7,51 @@ import (
 	"testing"
 )
 
+// The uninstalled-dependency loop: `python3 -m flask run` fails because flask
+// isn't in the sandbox. The steer must name the package and tell it to install.
+func TestMissingModuleSteerPythonDashM(t *testing.T) {
+	dir := t.TempDir()
+	ctx := &AgentContext{WorkingDir: dir}
+	out := "/usr/local/bin/python3: No module named flask\n"
+	steer := missingModuleSteer(ctx, out)
+	if !strings.Contains(steer, "flask") || !strings.Contains(steer, "pip install") {
+		t.Errorf("expected install steer naming flask, got: %q", steer)
+	}
+}
+
+// ModuleNotFoundError (import form), and a top-level package is extracted from
+// a dotted submodule.
+func TestMissingModuleSteerImportForm(t *testing.T) {
+	dir := t.TempDir()
+	ctx := &AgentContext{WorkingDir: dir}
+	out := "ModuleNotFoundError: No module named 'flask.cli'\n"
+	steer := missingModuleSteer(ctx, out)
+	if !strings.Contains(steer, "pip install flask") {
+		t.Errorf("expected `pip install flask` (top-level pkg), got: %q", steer)
+	}
+}
+
+// When a requirements.txt exists, prefer installing the whole manifest.
+func TestMissingModuleSteerPrefersRequirements(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &AgentContext{WorkingDir: dir}
+	out := "No module named flask\n"
+	steer := missingModuleSteer(ctx, out)
+	if !strings.Contains(steer, "pip install -r requirements.txt") {
+		t.Errorf("expected requirements.txt steer, got: %q", steer)
+	}
+}
+
+func TestMissingModuleSteerNoModuleError(t *testing.T) {
+	ctx := &AgentContext{WorkingDir: t.TempDir()}
+	if s := missingModuleSteer(ctx, "Total: 42\n"); s != "" {
+		t.Errorf("expected empty steer for unrelated output, got: %q", s)
+	}
+}
+
 // The case-typo loop: ran `pip install -r Requirements.txt` while the real
 // file is `requirements.txt`. The steer must name the actual file.
 func TestMissingFileSteerCaseMismatch(t *testing.T) {

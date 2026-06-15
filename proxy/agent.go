@@ -1081,6 +1081,13 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				if steer := tracebackSteer(ctx, scan); steer != "" {
 					ctx.Messages = append(ctx.Messages, AgentMessage{Role: "user", Content: steer})
 					log.Printf("[agent] traceback localization: steered to fix site")
+				} else if steer := missingModuleSteer(ctx, scan); steer != "" {
+					// Uninstalled-dependency recovery: the run failed with "No
+					// module named X". Tell the model to pip install it instead
+					// of re-running the identical failing command into the
+					// repetition breaker.
+					ctx.Messages = append(ctx.Messages, AgentMessage{Role: "user", Content: steer})
+					log.Printf("[agent] missing-module steer: directed to install dependency")
 				} else if steer := missingFileSteer(ctx, scan); steer != "" {
 					// Case-typo recovery: command referenced a file whose name
 					// differs only in case from a real workspace file. Name the

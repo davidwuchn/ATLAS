@@ -32,6 +32,54 @@ var (
 	reMissingShell  = regexp.MustCompile(`(?m)([^\s:'"]+): No such file or directory`)
 )
 
+// reMissingModule matches both shapes of "package not installed": the
+// `python -m` form (`/usr/local/bin/python3: No module named flask`) and the
+// import form (`ModuleNotFoundError: No module named 'flask'`).
+var reMissingModule = regexp.MustCompile(`No module named '?([A-Za-z0-9_.]+)'?`)
+
+// missingModuleSteer catches the uninstalled-dependency loop: the model runs
+// `python -m flask run` (or `python app.py`), the sandbox reports the package
+// isn't installed, and the model re-runs the identical command until the
+// repetition breaker kills the session (observed: flask run 3× then
+// run_background flask run 3× → stuck). tracebackSteer deliberately ignores
+// ModuleNotFoundError (it's not a code bug to localize), but ignoring it left
+// NO positive guidance. This provides it: the sandbox ships no app libraries,
+// so the fix is to install the package first. Returns "" when the output names
+// no missing module.
+func missingModuleSteer(ctx *AgentContext, output string) string {
+	if !strings.Contains(output, "No module named") {
+		return ""
+	}
+	m := reMissingModule.FindStringSubmatch(output)
+	if m == nil {
+		return ""
+	}
+	mod := m[1]
+	if i := strings.Index(mod, "."); i > 0 {
+		mod = mod[:i] // top-level package (flask.cli → flask)
+	}
+	// Prefer the project's own dependency manifest when one is present — it
+	// pins the right versions and installs everything in one shot.
+	hasReqs := false
+	if entries, err := os.ReadDir(resolveAgentPath(ctx, ".")); err == nil {
+		for _, e := range entries {
+			switch strings.ToLower(e.Name()) {
+			case "requirements.txt", "pyproject.toml", "pipfile":
+				hasReqs = true
+			}
+		}
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "[system note]: The command failed because the Python package `%s` is not installed in the sandbox (it ships no app libraries — install what the project needs). ", mod)
+	if hasReqs {
+		sb.WriteString("Install the project's dependencies first with `pip install -r requirements.txt`, then re-run. ")
+	} else {
+		fmt.Fprintf(&sb, "Install it first with `pip install %s`, then re-run. ", mod)
+	}
+	sb.WriteString("Re-running the command before installing will fail exactly the same way.")
+	return sb.String()
+}
+
 // missingFileSteer catches the case-typo loop: the model writes
 // `requirements.txt` then runs `pip install -r Requirements.txt`, gets "No
 // such file or directory", and re-runs the identical wrong command (observed:
