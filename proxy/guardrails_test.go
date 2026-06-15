@@ -83,19 +83,30 @@ func TestSanitizeFileContentPreservesTrailingNewline(t *testing.T) {
 	}
 }
 
-func TestValidateShellCommandBlocksDestructiveVerbs(t *testing.T) {
+// Catastrophic commands stay blocked even though run_command is otherwise
+// permissive — these would wipe the whole project, fork-bomb the sandbox, or
+// destroy a block device, none of which the project-folder jail protects
+// against on its own.
+func TestValidateShellCommandBlocksCatastrophic(t *testing.T) {
 	cases := []struct {
 		name string
 		cmd  string
 	}{
-		{"plain rm", "rm /workspace/foo.py"},
-		{"rm -rf", "rm -rf templates"},
-		{"mv", "mv templates venv/templates"},
-		{"cp overwrite", "cp old.py new.py"},
-		{"chained mv", "cd /workspace && mv app.py venv/"},
+		{"rm -rf root", "rm -rf /"},
+		{"rm -rf workspace root", "rm -rf /workspace"},
+		{"rm -rf workspace glob", "rm -rf /workspace/*"},
+		{"rm -rf home", "rm -rf $HOME"},
+		{"rm -rf dot", "rm -rf ."},
+		{"rm -rf star", "rm -rf *"},
+		{"rm -rf chained at root", "cd /workspace && rm -rf ."},
 		{"find -delete", "find . -name '*.tmp' -delete"},
 		{"find -exec rm", "find . -type f -exec rm {} \\;"},
-		{"truncating redirect", "echo bad > /workspace/app.py"},
+		{"fork bomb", ":(){ :|:& };:"},
+		{"mkfs", "mkfs.ext4 /dev/sda1"},
+		{"dd to device", "dd if=/dev/zero of=/dev/sda bs=1M"},
+		{"redirect to device", "echo x > /dev/sda"},
+		{"bash -c wrapping rm -rf /", `bash -c "rm -rf /"`},
+		{"eval wrapping rm -rf home", `eval "rm -rf $HOME"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,6 +114,32 @@ func TestValidateShellCommandBlocksDestructiveVerbs(t *testing.T) {
 				t.Errorf("validateShellCommand(%q) = empty, want rejection", tc.cmd)
 			}
 		})
+	}
+}
+
+// File-management commands the OLD policy blocked are now allowed — the model
+// shouldn't reinvent shell, and the sandbox jail bounds the blast radius to
+// the project folder. This is the regression guard for the 2026-06 loosening.
+func TestValidateShellCommandAllowsFileManagement(t *testing.T) {
+	allowed := []string{
+		"mv index.html templates/",
+		"mv templates venv/templates",
+		"cp old.py new.py",
+		"cd /workspace && mv app.py src/",
+		"rm app.py",                  // delete a specific file
+		"rm -f stale.pyc",            // forced, but not recursive
+		"rm -rf __pycache__",         // recursive, but a named subdir
+		"rm -rf node_modules build",  // named subdirs
+		"mkdir -p static/js",
+		"chmod +x run.sh",
+		"sed -i 's/foo/bar/' app.py", // in-place content edit via shell
+		"echo bad > app.py",          // truncating redirect into a project file
+		"ln -s ../shared lib",
+	}
+	for _, cmd := range allowed {
+		if got := validateShellCommand(cmd); got != "" {
+			t.Errorf("validateShellCommand(%q) rejected: %s", cmd, got)
+		}
 	}
 }
 
@@ -180,29 +217,31 @@ func TestValidateShellCommandAllowsLogRedirectWithTrailingFlags(t *testing.T) {
 	}
 }
 
-func TestValidateShellCommandBlocksBashCBypass(t *testing.T) {
-	// The deny-list is bypassable if the model wraps the destructive
-	// verb inside `bash -c "..."`. Roo Code's regression test case.
-	cases := []string{
-		`bash -c "rm -rf foo"`,
-		`sh -c 'mv templates venv/'`,
-		`zsh -c "echo malicious"`,
+func TestValidateShellCommandUnwrapsBashCForCatastrophic(t *testing.T) {
+	// `bash -c "..."` / `eval "..."` are allowed wrappers now, but they must
+	// not smuggle a catastrophic command past the denylist — we unwrap one
+	// layer and re-check.
+	blocked := []string{
+		`bash -c "rm -rf /"`,
+		`sh -c 'rm -rf /workspace'`,
 		`dash -c "find . -delete"`,
 		`eval "rm -rf $HOME"`,
-		`eval $command`,
+		`bash -c ":(){ :|:& };:"`,
 	}
-	for _, cmd := range cases {
+	for _, cmd := range blocked {
 		if got := validateShellCommand(cmd); got == "" {
 			t.Errorf("validateShellCommand(%q) = empty, want rejection", cmd)
 		}
 	}
 }
 
-func TestValidateShellCommandStillAllowsLegitShellWork(t *testing.T) {
-	// `bash -c` is the bypass; bash with no -c (or other flags) is fine.
-	// `python -c` is a common, legit verification idiom and should pass.
+func TestValidateShellCommandAllowsLegitShellWork(t *testing.T) {
+	// bash -c wrapping a benign command is fine now; `python -c` / `node -e`
+	// verification idioms must pass.
 	allowed := []string{
 		"bash --version",
+		`bash -c "python app.py"`,
+		`sh -c 'pytest -q'`,
 		"python -c 'import flask; print(flask.__version__)'",
 		"node -e 'console.log(1+1)'",
 		"git log -c",
@@ -285,8 +324,9 @@ func TestValidateWorkingDirReferenceIgnoresUnrelatedPaths(t *testing.T) {
 
 func TestValidateRunCommandChainsBothGates(t *testing.T) {
 	const wd = "/home/isaac/snake"
-	// Shell-mutation gate fires first (more specific message).
-	if got := validateRunCommand("rm -rf /workspace/foo", wd); got == "" || !strings.Contains(got, "rm") {
+	// Shell-mutation gate fires first (more specific message). Use a
+	// catastrophic command, since targeted file ops are now allowed.
+	if got := validateRunCommand("rm -rf /", wd); got == "" || !strings.Contains(got, "rm") {
 		t.Errorf("expected shell-mutation rejection mentioning rm, got %q", got)
 	}
 	// /workspace gate fires when shell-mutation is clean.

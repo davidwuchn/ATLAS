@@ -146,10 +146,12 @@ def list_languages():
 # proxy sees, so paths the agent learned from read_file / list_directory
 # carry over verbatim.
 #
-# Safety: the proxy's validateShellCommand still blocks destructive verbs
-# (rm/mv/cp/find -delete + bash -c bypass) BEFORE the call ever reaches
-# us. This endpoint is the executor, not the gate. The container itself
-# runs no-new-privileges with /workspace as the only writable host mount.
+# Safety: the proxy's validateShellCommand blocks only CATASTROPHIC commands
+# (whole-project wipe like `rm -rf /`, fork bombs, device destruction) BEFORE
+# the call reaches us — ordinary file ops (mv/cp/rm of a file/mkdir) are
+# allowed. This endpoint is the executor, not the gate. The real boundary is
+# the container: no-new-privileges, read-only rootfs, and /workspace as the
+# ONLY writable host mount, so the blast radius is the project folder.
 # ---------------------------------------------------------------------------
 
 
