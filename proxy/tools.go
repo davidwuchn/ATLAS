@@ -32,6 +32,7 @@ func init() {
 	registerTool(editFileTool())
 	registerTool(astEditTool())
 	registerTool(deleteFileTool())
+	registerTool(moveFileTool())
 	registerTool(runCommandTool())
 	registerTool(searchFilesTool())
 	registerTool(findFileTool())
@@ -118,6 +119,8 @@ func missingArgsHint(name string) string {
 		return `edit_file: no arguments provided. Call with {"path":"<file>","old_str":"<exact text to replace>","new_str":"<replacement>"}.`
 	case "delete_file":
 		return `delete_file: no arguments provided. Call with {"path":"<file>"}.`
+	case "move_file":
+		return `move_file: no arguments provided. Call with {"source":"<current path>","destination":"<new path or dir>"}.`
 	case "list_directory":
 		return `list_directory: no arguments provided. Call with {"path":"."} for the working directory or {"path":"<subdir>"}.`
 	case "search_files":
@@ -1895,6 +1898,119 @@ func deleteFileTool() *ToolDef {
 			// suggestion in chat after a destructive operation.
 			result.Error = "__FORCE_DONE__"
 			return result, nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// move_file — relocate / rename a file within the workspace.
+//
+// Added to close the "reorganize the files" gap (observed: a flask task asked
+// to move index.html into templates/; `mv` is refused, there is no move tool,
+// so the model looped on mkdir until the repetition breaker fired). A pure
+// move is not a content change, so it bypasses the V3 / surgical-edit gate —
+// content is preserved verbatim. Refuses to clobber an existing destination
+// file so a relocation can't silently destroy data.
+// ---------------------------------------------------------------------------
+
+func moveFileTool() *ToolDef {
+	return &ToolDef{
+		Name:        "move_file",
+		Description: "Move or rename a file within the project (e.g. move index.html into templates/, or rename old.py to new.py). Use this to reorganize files — shell `mv`/`cp` are refused. If destination is an existing directory, the file is moved into it keeping its name. Content is preserved exactly.",
+		InputSchema: MoveFileInput{},
+		ReadOnly:    false,
+		Destructive: false,
+		Execute: func(rawInput json.RawMessage, ctx *AgentContext) (*ToolResult, error) {
+			var input MoveFileInput
+			if err := json.Unmarshal(rawInput, &input); err != nil {
+				return nil, fmt.Errorf("invalid input: %w", err)
+			}
+			if strings.TrimSpace(input.Source) == "" || strings.TrimSpace(input.Destination) == "" {
+				return &ToolResult{
+					Success: false,
+					Error:   `move_file: both source and destination are required. Call with {"source":"<current path>","destination":"<new path>"}.`,
+				}, nil
+			}
+
+			src := resolveAgentPath(ctx, input.Source)
+			srcInfo, err := os.Stat(src)
+			if err != nil {
+				return &ToolResult{
+					Success: false,
+					Error:   fmt.Sprintf("move_file: source %s not found. Use list_directory or find_file to confirm the path before moving.", input.Source),
+				}, nil
+			}
+
+			// Resolve destination. If it names an existing directory (or ends
+			// with a separator), move INTO it keeping the source basename —
+			// mirrors `mv file dir/`. The relative dest is what we report back
+			// so the model's mental model stays in project-relative terms.
+			relDest := input.Destination
+			dst := resolveAgentPath(ctx, input.Destination)
+			if info, err := os.Stat(dst); err == nil && info.IsDir() {
+				dst = filepath.Join(dst, filepath.Base(src))
+				relDest = filepath.Join(input.Destination, filepath.Base(src))
+			} else if strings.HasSuffix(input.Destination, "/") {
+				dst = filepath.Join(dst, filepath.Base(src))
+				relDest = filepath.Join(input.Destination, filepath.Base(src))
+			}
+
+			if src == dst {
+				return &ToolResult{
+					Success: false,
+					Error:   "move_file: source and destination are the same path — nothing to do.",
+				}, nil
+			}
+
+			// Never clobber an existing destination file: a relocation must not
+			// silently destroy data. Tell the model to pick another name or
+			// delete_file the destination first if the overwrite is intended.
+			if _, err := os.Stat(dst); err == nil {
+				return &ToolResult{
+					Success: false,
+					Error:   fmt.Sprintf("move_file: destination %s already exists. Pick a different name, or delete_file the destination first if you mean to replace it.", relDest),
+				}, nil
+			}
+
+			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+				return nil, fmt.Errorf("move_file: cannot create destination dir: %w", err)
+			}
+
+			// os.Rename is atomic on the same filesystem; fall back to
+			// copy+remove across devices (bind mounts can straddle filesystems).
+			if err := os.Rename(src, dst); err != nil {
+				if srcInfo.IsDir() {
+					return nil, fmt.Errorf("move_file: cannot move directory across filesystems: %w", err)
+				}
+				data, rerr := os.ReadFile(src)
+				if rerr != nil {
+					return nil, fmt.Errorf("move_file: cannot read source: %w", rerr)
+				}
+				if werr := os.WriteFile(dst, data, srcInfo.Mode().Perm()); werr != nil {
+					return nil, fmt.Errorf("move_file: cannot write destination: %w", werr)
+				}
+				os.Remove(src)
+			}
+			log.Printf("[move_file] %s → %s", input.Source, relDest)
+
+			// Keep agent bookkeeping consistent: the file the model just read
+			// now lives at the new path. Re-point the recorded read and the
+			// session-write set so a follow-up edit isn't bounced as blind and
+			// dedup logic tracks the right path.
+			if content, ok := ctx.FilesRead[src]; ok {
+				ctx.RecordFileRead(dst, content)
+				delete(ctx.FilesRead, src)
+			}
+			if ctx.SessionWrites != nil {
+				if ctx.SessionWrites[input.Source] {
+					delete(ctx.SessionWrites, input.Source)
+				}
+				ctx.SessionWrites[relDest] = true
+			}
+
+			out := MoveFileOutput{Moved: true, Source: input.Source, Destination: relDest}
+			outBytes, _ := json.Marshal(out)
+			return &ToolResult{Success: true, Data: outBytes}, nil
 		},
 	}
 }

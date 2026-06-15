@@ -244,7 +244,7 @@ These are pattern-`Contains` matches against the command / file path, so the `.e
 
 ### Shell-mutation gate
 
-`run_command` is rejected on the leading verb when it would mutate user files — destructive ops must use the dedicated `write_file` / `edit_file` / `delete_file` tools (which go through V3 + the surgical-edit gate + audit logging). Source: `proxy/guardrails.go:validateShellCommand`.
+`run_command` is rejected on the leading verb when it would mutate user files — destructive ops must use the dedicated `write_file` / `edit_file` / `delete_file` tools (which go through V3 + the surgical-edit gate + audit logging), and `mv`/`cp` (relocations) must use `move_file`. The `mv`/`cp` rejection points the model straight at `move_file` so a "reorganize the files" request lands in one call instead of looping. Source: `proxy/guardrails.go:validateShellCommand`.
 
 | Pattern | Reaction |
 |---------|----------|

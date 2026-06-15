@@ -234,6 +234,26 @@ type DeleteFileOutput struct {
 	Deleted bool `json:"deleted"`
 }
 
+// -- move_file --
+//
+// Relocate or rename a file within the workspace. A pure move/rename is not a
+// content change, so it does NOT go through the V3 / surgical-edit gate the way
+// write_file/edit_file do — it exists so "reorganize the files" (e.g. move
+// index.html into templates/) is a single tool call instead of a
+// read→write→delete dance the model can't reliably compose. Shell `mv`/`cp`
+// stay refused; this is the supported relocation path.
+
+type MoveFileInput struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+}
+
+type MoveFileOutput struct {
+	Moved       bool   `json:"moved"`
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+}
+
 // -- run_command --
 
 type RunCommandInput struct {

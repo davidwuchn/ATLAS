@@ -191,7 +191,13 @@ func validateShellCommand(cmd string) string {
 // tool_result and (in practice) re-emits the operation as edit_file
 // or delete_file.
 func shellRejectionMessage(verb, detail string) string {
-	return "run_command refused: " + detail + ". Modify files with the dedicated tools — `edit_file` (old_str/new_str) for content changes, `write_file` for brand-new files, `delete_file` for removal. Shell `" + verb + "` bypasses the surgical-edit gate, the V3 pipeline, and audit logging, and will be rejected."
+	// mv/cp are relocations, not content edits — point them at move_file
+	// (the supported relocation path) rather than the edit/write/delete
+	// dance, which the model can't reliably compose for a move.
+	if verb == "mv" || verb == "cp" {
+		return "run_command refused: " + detail + ". To move or rename a file use `move_file` ({\"source\":\"<current path>\",\"destination\":\"<new path or dir>\"}) — e.g. move index.html into templates/. Shell `" + verb + "` bypasses the audit log and is rejected. (To create a copy, move_file the original then write_file the second location.)"
+	}
+	return "run_command refused: " + detail + ". Modify files with the dedicated tools — `edit_file` (old_str/new_str) for content changes, `write_file` for brand-new files, `delete_file` for removal, `move_file` to move/rename. Shell `" + verb + "` bypasses the surgical-edit gate, the V3 pipeline, and audit logging, and will be rejected."
 }
 
 // workspaceRefRe matches `/workspace` as a path component (preceded by

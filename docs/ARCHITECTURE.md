@@ -151,6 +151,7 @@ The JSON schema uses `oneOf` with `additionalProperties: false` and enumerates t
 | `edit_file` | Surgical inline string replacement (old_str/new_str) for ≤10-line changes | No |
 | `ast_edit` | Whole-function/class/HTML-element rewrite via tree-sitter selector (`function:NAME`, `class:NAME`, `<tag>`); REQUIRED over edit_file for whole-node swaps. GH #39, .py/.html/.htm only in v1 | No |
 | `delete_file` | Delete file or empty directory (forces loop exit after) | No |
+| `move_file` | Move or rename a file within the workspace (e.g. `index.html` → `templates/`). Pure relocation — bypasses the V3/surgical-edit gate, refuses to clobber an existing destination. The supported path for "reorganize the files" since shell `mv`/`cp` are refused | No |
 | `find_file` | Regex search by file **name** / path (cheap existence + locate). Distinct from `search_files` which greps inside file contents. PC-028 | Yes |
 | `search_files` | Regex search across file contents (max 200 matches, skips .git/node_modules) | Yes |
 | `list_directory` | List directory contents with type and size | Yes |
