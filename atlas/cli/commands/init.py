@@ -464,6 +464,54 @@ def _step_download(m: model_registry.Model, models_dir: str,
 # Step 4 — write .env
 # ---------------------------------------------------------------------------
 
+def _detect_total_ram_gib() -> float:
+    """Best-effort total physical RAM in GiB, portable across the platforms
+    ATLAS installs on. Returns 0.0 when it can't tell (caller treats that as
+    "leave the sandbox memory uncapped")."""
+    # Linux — authoritative and dependency-free.
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / (1024 ** 2)  # kB → GiB
+    except OSError:
+        pass
+    # macOS / BSD.
+    try:
+        import subprocess
+        out = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                             capture_output=True, text=True, timeout=3)
+        if out.returncode == 0 and out.stdout.strip():
+            return int(out.stdout.strip()) / (1024 ** 3)
+    except Exception:
+        pass
+    # Portable fallback if psutil happens to be installed.
+    try:
+        import psutil
+        return psutil.virtual_memory().total / (1024 ** 3)
+    except Exception:
+        return 0.0
+
+
+def _sandbox_limits() -> Tuple[str, str]:
+    """Compute (ATLAS_SANDBOX_MEM, ATLAS_SANDBOX_PIDS) for THIS host.
+
+    The sandbox runs untrusted model-authored shell, so the container is the
+    real backstop against resource exhaustion. We cap memory at ~75% of host
+    RAM (a ceiling, not a reservation — normal builds use a few GB) so a
+    runaway can't OOM the host, with a 2 GiB floor so a small box can still
+    build. pids_limit is a constant fork-bomb stop. Returns ("0", …) for
+    memory when RAM can't be detected — "0" means Docker leaves it uncapped,
+    so detection failure degrades to the prior behavior rather than a bad cap.
+    """
+    ram = _detect_total_ram_gib()
+    if ram <= 0:
+        mem = "0"  # undetectable → no cap (no regression vs. before)
+    else:
+        mem = f"{max(2, int(ram * 0.75))}g"
+    return mem, "1024"
+
+
 def _render_env(m: model_registry.Model, profile: tier.TierProfile,
                  selected_gpu: Optional[tier.GPUInfo],
                  models_dir: str, atlas_root: str, image_tag: str,
@@ -498,6 +546,8 @@ def _render_env(m: model_registry.Model, profile: tier.TierProfile,
         backend_id, backend_name, _ = _backend_for(vendor)
     gpu_index = str(selected_gpu.index) if selected_gpu else "0"
 
+    sandbox_mem, sandbox_pids = _sandbox_limits()
+
     keys = {
         "ATLAS_MODELS_DIR": models_value,
         "ATLAS_MODEL_FILE": m.model_file,
@@ -516,6 +566,10 @@ def _render_env(m: model_registry.Model, profile: tier.TierProfile,
         "ATLAS_V3_PORT": "8070",
         "ATLAS_SANDBOX_PORT": "30820",
         "ATLAS_PROXY_PORT": "8090",
+        # Sandbox resource caps, sized to this host (see _sandbox_limits).
+        # mem ~75% of detected RAM; pids a constant fork-bomb stop.
+        "ATLAS_SANDBOX_MEM": sandbox_mem,
+        "ATLAS_SANDBOX_PIDS": sandbox_pids,
     }
 
     gpu_descr = (f"{selected_gpu.name} ({selected_gpu.vram_gb:.1f} GB VRAM)"
