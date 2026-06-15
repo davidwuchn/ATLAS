@@ -1541,14 +1541,36 @@ func callLLMOnce(ctx *AgentContext, messages []AgentMessage, temperature float64
 // the tool-name production for a single decision). The json_object
 // response_format is dropped in that case because GBNF is the more
 // specific constraint and supersedes it.
-func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperature float64, grammar string) (string, int, error) {
-	wireMessages := make([]map[string]string, len(messages))
+// toWireMessages converts the agent's internal messages to the role/content
+// pairs sent on /v1/chat/completions.
+//
+// Tool results are rendered as a USER turn. Gemma's chat template has no `tool`
+// role and silently DROPS role:"tool" messages — the model never sees the
+// result (verified: the prompt carries only the user/assistant turns and the
+// model reasons "the tool output is not visible"), so it re-issues the same
+// tool call forever until the repetition breaker fires. This was the real
+// cause behind every "it can't see what it's reading / it just loops" report.
+// Every chat template handles the user role, so converting here is
+// model-agnostic (Qwen reads it the same way); the `[tool result]` marker
+// tells the model this is tool output, not a fresh user instruction.
+// ctx.Messages keeps the semantic "tool" role so trim-pinning and the
+// step/traceback exclusions that key off ToolName still work.
+func toWireMessages(messages []AgentMessage) []map[string]string {
+	wire := make([]map[string]string, len(messages))
 	for i, msg := range messages {
-		wireMessages[i] = map[string]string{
-			"role":    msg.Role,
-			"content": msg.Content,
+		role := msg.Role
+		content := msg.Content
+		if role == "tool" {
+			role = "user"
+			content = "[tool result] " + content
 		}
+		wire[i] = map[string]string{"role": role, "content": content}
 	}
+	return wire
+}
+
+func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperature float64, grammar string) (string, int, error) {
+	wireMessages := toWireMessages(messages)
 
 	llamaURL := envOr("ATLAS_LLAMA_URL", ctx.InferenceURL)
 
