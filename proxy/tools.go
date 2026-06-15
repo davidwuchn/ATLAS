@@ -2683,14 +2683,24 @@ func redundantReadShortCircuit(name string, args json.RawMessage, ctx *AgentCont
 }
 
 // fileContentInContext reports whether a file's content is still present in
-// the live (post-trim) conversation. Uses the file's longest line as a
-// distinctive probe — the read tool stores numbered lines, so the raw line
-// text is a substring of whatever's in context if the read survived trimming.
-// Conservative: an empty/whitespace file probes as "present" (nothing to lose).
+// the live (post-trim) conversation. Conservative: an empty/short-content file
+// probes as "present" (nothing to lose).
+//
+// The probe must survive JSON escaping. Tool results are stored in the
+// conversation via ToolResult.MarshalText (json.Marshal), so the file content
+// lives in ctx.Messages with `"`→`\"`, newlines→`\n`, tabs→`\t`. The old probe
+// (the longest raw LINE) failed for any file whose longest line contained a
+// double quote — e.g. a flask app's embedded HTML/JS — producing a false
+// "trimmed" verdict that made the dedup re-serve the whole file every read and
+// the model loop on read_file. Instead, probe with the longest maximal run of
+// characters JSON does NOT escape (no `"`, `\`, or \n/\r/\t); that run is byte-
+// identical in both the raw file and the escaped conversation copy.
 func fileContentInContext(ctx *AgentContext, content string) bool {
 	probe := ""
-	for _, l := range strings.Split(content, "\n") {
-		t := strings.TrimSpace(l)
+	for _, run := range strings.FieldsFunc(content, func(r rune) bool {
+		return r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t'
+	}) {
+		t := strings.TrimSpace(run)
 		if len(t) > len(probe) {
 			probe = t
 		}
