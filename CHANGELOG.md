@@ -4,6 +4,29 @@
 
 ## Unreleased
 
+### Agent reliability — local-model tool loop
+- Tool results are rendered as user-role turns on the wire. Gemma's chat template has no `tool` role and silently dropped `role:"tool"` messages, so the model never saw any tool output (`list_directory` / `read_file` / `run_command`) and re-issued the same call until the repetition breaker fired. This was the root cause behind the "it can't see what it's reading / it just loops" reports. Model-agnostic (Qwen reads the `[tool result]` marker the same way).
+- Read-dedup false-negative fixed: `fileContentInContext` probed the raw longest line, but tool results are stored JSON-escaped, so any file whose longest line contained a quote (e.g. a Flask app's embedded HTML) was wrongly judged "trimmed" and re-served every read → read loop. Now probes the longest escape-free run.
+- Traceback → directed edit (#39 / option 3): a `run_command` crash extracts the deepest in-project frame, quotes the offending line, and steers a minimal `edit_file`; run tools are banned from the next decision's grammar so the model must edit rather than re-run.
+- `move_file` tool: relocations/renames (e.g. `index.html` → `templates/`) no longer require a read→write→delete dance; shell `mv`/`cp` point here. Refuses to clobber an existing destination.
+- Steers for common dead-ends: `No module named X` → `pip install` (instead of re-running), and a filename that differs only in case from a real workspace file → the correct name.
+- Per-turn `max_tokens` 32768 → 8192 (`ATLAS_MAX_TOKENS`) and a content-stream loop cut, bounding runaways that previously ran to the slot ceiling.
+- Conversation window sized to the per-slot context (with the active file pinned in the trim) instead of a flat cap that dropped the file under edit.
+
+### Sandbox — shell policy + isolation
+- `run_command` shell gate narrowed from "block every mutating verb" to catastrophic-only (whole-project/root `rm -rf`, fork bombs, device destruction), since the sandbox container (read-only rootfs, no-new-privileges, project-only writable mount, cwd jailed) is the real boundary. Ordinary `mv`/`cp`/`mkdir`/`rm <file>`/`sed -i` now run; `bash -c`/`eval` are unwrapped so a wrapped catastrophic command can't slip through.
+- Host-sized cgroup limits on the sandbox: `pids_limit` (kernel-level fork-bomb stop) and a memory cap (`atlas init` detects host RAM and writes `ATLAS_SANDBOX_MEM` ~75%); `:-0` fallback keeps a raw `docker compose up` working uncapped.
+- Interactive wall-clock cap on the V3 pipeline (`ATLAS_V3_TIMEOUT`, default 180s) — a runaway falls back to the model's own (syntax-gated) content instead of hanging the session.
+
+### Geometric Lens — per-model thresholds + in-the-loop training data
+- G(x) operating thresholds are now per-model and ship with the lens artifact (`gx_thresholds.json`): the lens service loads them and returns them in each score response; the proxy uses them for its regression checks. The hardcoded 0.3 / 0.15 / 0.05 cutoffs were calibrated to one model's score scale and never fired for a model (e.g. Gemma) whose scores cluster higher. `atlas lens build` auto-emits the file, calibrated from the run's PASS-score percentiles.
+- ast_edit now matches `<script>` / `<style>` (tree-sitter parses them as dedicated `script_element` / `style_element` nodes, not generic `element`s — the old query matched 0).
+- In-the-loop lens-training data collection: each agent file-write is captured per pass; in the TUI, `/good`·`/bad` rate a pass and `/review` + `/deny`·`/accept` set per-file verdicts, which the proxy turns into labeled, weighted samples (a 👎 pass down-weights even its accepted files; a denial is a full-weight negative). `/redo` regenerates a rejected file. A one-time "lens retrain available" banner appears once enough balanced samples accrue.
+- `atlas lens retrain` trains the lens on that collected corpus (weighted G(x)) so it learns the user's own workloads, and emits fresh calibrated thresholds. New env: `ATLAS_LENS_DATA_DIR`, `ATLAS_LENS_RETRAIN_MIN`. TUI slash commands: `/good /bad /review /deny /accept /redo`.
+
+### Structural call-graph reasoning (#39, thanks @yogthos)
+- Intra-file call-graph neighborhood (`calls:` / `called by:` per symbol) rides on `outline_file` and whole-file `read_file` of a `.py`, gated by `ATLAS_CALL_GRAPH`. Surfaces structure at the localization decision point without a repo-wide scan. (PR #125 by Dmitri Sotnikov, integrated and extended.)
+
 ### Removed
 - Removed dead `ATLAS_USE_FOX` code paths in benchmark runner (#22)
 
