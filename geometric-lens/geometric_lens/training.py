@@ -285,6 +285,12 @@ def train_gx(
 
     X = np.array(data["embeddings"], dtype=np.float32)
     y = np.array(data["labels"], dtype=np.int32)
+    # Optional per-sample weights (in-the-loop labeling: a thumbs-down pass
+    # down-weights its accepted files, a denial is full-weight, etc.). Absent
+    # or wrong-length → uniform weights, so bench-built lenses are unaffected.
+    w = None
+    if data.get("weights") is not None and len(data["weights"]) == len(y):
+        w = np.array(data["weights"], dtype=np.float32)
     n, dim = X.shape
     n_pass, n_fail = int((y == 1).sum()), int((y == 0).sum())
     if min(n_pass, n_fail) < 5:
@@ -308,7 +314,7 @@ def train_gx(
     aucs, accs, best_rounds = [], [], []
     skf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed)
     for fold, (tr, te) in enumerate(skf.split(Xp, y)):
-        dtr = xgb.DMatrix(Xp[tr], label=y[tr])
+        dtr = xgb.DMatrix(Xp[tr], label=y[tr], weight=(w[tr] if w is not None else None))
         dte = xgb.DMatrix(Xp[te], label=y[te])
         bst = xgb.train(params, dtr, num_boost_round=max_rounds,
                         evals=[(dte, "val")], early_stopping_rounds=30,
@@ -322,7 +328,7 @@ def train_gx(
 
     # Final model on the full set, sized by the folds' early stopping.
     rounds = int(np.median(best_rounds))
-    dall = xgb.DMatrix(Xp, label=y)
+    dall = xgb.DMatrix(Xp, label=y, weight=w)
     booster = xgb.train(params, dall, num_boost_round=rounds)
 
     scores = booster.predict(dall)

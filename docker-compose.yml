@@ -264,9 +264,10 @@ services:
       - ${ATLAS_MODELS_DIR:-./models}:/models:ro
       - ${ATLAS_PROJECT_DIR:-.}:/workspace
       # Lens training-data corpus (per-file accept/deny + pass thumbs → labeled,
-      # weighted samples). Persists across proxy restarts so it accumulates
-      # toward a retrain. Read by `atlas lens retrain`.
-      - lens-training:/data/lens_training
+      # weighted samples). Host bind-mount so `atlas lens retrain` (host CLI)
+      # reads the same corpus the proxy writes. Persists + accumulates toward a
+      # retrain. ATLAS_LENS_HOST_DIR overrides the host path.
+      - ${ATLAS_LENS_HOST_DIR:-./lens_training}:/data/lens_training
     working_dir: /workspace
     ports:
       - "${ATLAS_PROXY_PORT:-8090}:8090"
@@ -289,7 +290,6 @@ services:
 
 volumes:
   lens-data:
-  lens-training:
   redis-data:
 
 networks:

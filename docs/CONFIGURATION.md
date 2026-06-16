@@ -166,7 +166,18 @@ stops at the one step only you can do (the rebuild); the manual flow is:
    `pass`/`fail` `gx_min` distributions (e.g. `severe` ≈ the 5th percentile of
    `fail`, `low` ≈ where pass/fail separate) — and write `gx_thresholds.json`
    into `geometric-lens/geometric_lens/models/`. It publishes/downloads with the
-   rest of the lens artifacts.
+   rest of the lens artifacts. (`atlas lens build` now emits this file
+   automatically, calibrated from the run's `pass` percentiles.)
+
+   **Retraining from your own use (`atlas lens retrain`).** Instead of a bench
+   run, the lens can learn from the workloads you actually run: each agent file
+   write is collected, and your verification (per-file accept/deny + a pass
+   👍/👎) labels and weights it (see `ATLAS_LENS_DATA_DIR` / `ATLAS_LENS_RETRAIN_MIN`).
+   Once enough balanced samples accumulate, `atlas lens retrain` runs the same
+   build pipeline on that corpus (weighted G(x) — a 👎 pass down-weights even its
+   accepted files; a denial is a full-weight negative) and emits fresh,
+   calibrated `gx_thresholds.json`. This makes the lens representative of *your*
+   work (e.g. Dockerfiles/config the algorithmic-bench lens never learned).
    Do **not** reuse another model's solution set — both lens halves are
    dimension-coupled to the model: `C(x)` must learn *this* model's cost
    geometry, and `G(x)`'s PCA projection is shaped to the embedding width.
