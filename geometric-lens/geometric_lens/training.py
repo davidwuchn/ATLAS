@@ -338,9 +338,24 @@ def train_gx(
     print(f"PASS score: {scores[y == 1].mean():.4f} | "
           f"FAIL score: {scores[y == 0].mean():.4f}")
 
+    # Per-model operating thresholds, derived from THIS model's score scale so
+    # the off-rails / regression interventions actually fire (a fixed 0.3/0.15
+    # cutoff tuned for one model is silent on another whose grounded writes
+    # cluster higher — the Gemma case). gx_score = P(pass): good writes score
+    # high, bad writes low. We anchor on percentiles of the PASS distribution
+    # so each cutoff has a controlled false-positive rate on good writes:
+    #   severe (~5th pct)    — a good write almost never scores this low, so one
+    #                          sample below it is enough to intervene
+    #   off_rails (~10th pct)— per-token "stop generating" cutoff
+    #   low (~20th pct)      — moderate; run-of-2 below it is a regression
+    # Clamped to a sane band and ordered severe <= off_rails <= low.
+    thresholds = _derive_gx_thresholds(scores[y == 1])
+    print(f"G(x) thresholds (from PASS percentiles): {thresholds}")
+
     return {
         "booster": booster,
         "cv_auc_mean": cv_auc,
+        "thresholds": thresholds,
         "weights": {
             "architecture": "xgboost_pca",
             "pca_dim": k,
@@ -356,6 +371,33 @@ def train_gx(
             "pca_components": pca.components_.astype(np.float64).tolist(),
             "pca_mean": pca.mean_.astype(np.float64).tolist(),
         },
+    }
+
+
+def _derive_gx_thresholds(pass_scores) -> dict:
+    """Compute per-model {off_rails, low, severe} from the PASS-class score
+    distribution. Percentile-anchored so each cutoff has a controlled
+    false-positive rate on good writes; clamped to [0.02, 0.6] and ordered
+    severe <= off_rails <= low. Falls back to the historical defaults when
+    there aren't enough PASS samples to estimate percentiles reliably."""
+    import numpy as np
+    default = {"off_rails": 0.3, "low": 0.15, "severe": 0.05}
+    if pass_scores is None or len(pass_scores) < 20:
+        return default
+
+    def clamp(v):
+        return float(min(0.6, max(0.02, v)))
+
+    severe = clamp(float(np.percentile(pass_scores, 5)))
+    off_rails = clamp(float(np.percentile(pass_scores, 10)))
+    low = clamp(float(np.percentile(pass_scores, 20)))
+    # Enforce ordering after clamping (a bound can collapse the spread).
+    off_rails = max(off_rails, severe)
+    low = max(low, off_rails)
+    return {
+        "off_rails": round(off_rails, 3),
+        "low": round(low, 3),
+        "severe": round(severe, 3),
     }
 
 
@@ -378,6 +420,16 @@ def save_gx(gx_result: dict, save_dir=None):
     with open(weights_path, "w") as f:
         json.dump(gx_result["weights"], f)
     print(f"G(x) model saved to {xgb_path}")
+
+    # Per-model operating thresholds travel with the artifact (the lens service
+    # loads this per-model; the proxy reads it back from each score response).
+    # Absent → service falls back to the historical fixed cutoffs.
+    thresholds = gx_result.get("thresholds")
+    if thresholds:
+        thr_path = os.path.join(save_dir, "gx_thresholds.json")
+        with open(thr_path, "w") as f:
+            json.dump(thresholds, f, indent=2)
+        print(f"G(x) thresholds saved to {thr_path}: {thresholds}")
 
     stale_pkl = os.path.join(save_dir, "gx_xgboost.pkl")
     if os.path.exists(stale_pkl):

@@ -1512,7 +1512,7 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
     # registry consumer who only gets cost_field.pt would run with a
     # dormant (or wrong-dimension) G(x). (G(x) itself is XGBoost trees in
     # native JSON — already pickle-free; safetensors doesn't apply.)
-    for opt in ("gx_xgboost.json", "gx_weights.json"):
+    for opt in ("gx_xgboost.json", "gx_weights.json", "gx_thresholds.json"):
         if os.path.isfile(os.path.join(artifact_dir, opt)):
             files_to_upload.append(opt)
     if "gx_xgboost.json" not in files_to_upload:
