@@ -24,6 +24,38 @@ _gx_top_dims = None        # Top contributing PCA dimensions
 _models_loaded = False
 _load_attempted = False
 
+# Per-model lens operating thresholds. These travel WITH the lens artifact
+# (gx_thresholds.json in the model's lens dir) because the G(x) score scale is
+# model-specific: a 0.3 off-rails cutoff that fits one model's distribution is
+# wrong for another's (e.g. a model whose grounded writes cluster at 0.4-0.55
+# never crosses 0.3, so the intervention never fires). The hardcoded values
+# here are the fallback for any lens published before thresholds were bundled.
+#   off_rails — per-token gx below this marks the first "stop generating" idx
+#   low       — aggregate gx_min below this is a low-quality write (proxy)
+#   severe    — aggregate gx_min below this is bad enough to act on one sample
+_gx_thresholds = {"off_rails": 0.3, "low": 0.15, "severe": 0.05}
+
+
+def _load_gx_thresholds(models_dir: str) -> None:
+    """Load per-model operating thresholds from gx_thresholds.json if present,
+    overlaying the defaults. Missing file / missing keys keep the defaults, so
+    a lens that predates bundled thresholds still scores (with the old fixed
+    cutoffs) instead of breaking."""
+    import json as _json
+    path = os.path.join(models_dir, "gx_thresholds.json")
+    if not os.path.exists(path):
+        logger.info("No gx_thresholds.json — using default lens thresholds %s", _gx_thresholds)
+        return
+    try:
+        with open(path) as fh:
+            loaded = _json.load(fh)
+        for k in ("off_rails", "low", "severe"):
+            if k in loaded and isinstance(loaded[k], (int, float)):
+                _gx_thresholds[k] = float(loaded[k])
+        logger.info("Loaded per-model lens thresholds from %s: %s", path, _gx_thresholds)
+    except Exception as e:
+        logger.warning("gx_thresholds.json load failed (%s) — using defaults %s", e, _gx_thresholds)
+
 
 def is_enabled() -> bool:
     """Check if Geometric Lens is enabled (GEOMETRIC_LENS_ENABLED env var)."""
@@ -73,6 +105,9 @@ def _ensure_models_loaded():
         if not os.path.exists(cost_path):
             logger.warning(f"Geometric Lens model files not found in {models_dir}")
             return False
+
+        # Per-model operating thresholds ship alongside the lens artifact.
+        _load_gx_thresholds(models_dir)
 
         sd = torch.load(cost_path, map_location="cpu", weights_only=True)
         dim = sd["net.0.weight"].shape[1]
@@ -577,7 +612,7 @@ def evaluate_per_step(query: str, layer: Optional[int] = None) -> dict:
             "gx_score_mean":  float(gx_scores.mean()),
             # token index where the lens first sees a low-quality state —
             # the natural "stop generating" signal for PC-207 callers.
-            "first_off_rails_idx": int(np.argmax(gx_scores < 0.3)) if gx_available and (gx_scores < 0.3).any() else -1,
+            "first_off_rails_idx": int(np.argmax(gx_scores < _gx_thresholds["off_rails"])) if gx_available and (gx_scores < _gx_thresholds["off_rails"]).any() else -1,
         }
 
         elapsed_ms = (time.monotonic() - start) * 1000
@@ -599,6 +634,11 @@ def evaluate_per_step(query: str, layer: Optional[int] = None) -> dict:
             "hidden_dim":   hidden_dim,
             "layer":        tap_label,
             "latency_ms":   round(elapsed_ms, 1),
+            # The per-model thresholds this score was judged against. The proxy
+            # uses these for its run-of-N / severe regression checks instead of
+            # its own hardcoded constants, so the whole intervention chain is
+            # calibrated to the loaded model's score scale.
+            "thresholds":   dict(_gx_thresholds),
         }
 
     except Exception as e:

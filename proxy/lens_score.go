@@ -56,15 +56,43 @@ type lensAggregate struct {
 	CxNormMax        float64 `json:"cx_norm_max"`
 }
 
+// lensThresholds are the per-model operating points the lens service judged a
+// score against. They ship with the lens artifact (gx_thresholds.json) and are
+// returned in every score response so the proxy's regression checks use the
+// loaded model's calibration instead of the hardcoded fallback constants.
+type lensThresholds struct {
+	OffRails float64 `json:"off_rails"`
+	Low      float64 `json:"low"`
+	Severe   float64 `json:"severe"`
+}
+
 type lensPerStepResult struct {
-	Enabled     bool          `json:"enabled"`
-	GxAvailable bool          `json:"gx_available"`
-	NTokens     int           `json:"n_tokens"`
-	HiddenDim   int           `json:"hidden_dim"`
-	Layer       string        `json:"layer"`
-	Aggregate   lensAggregate `json:"aggregate"`
-	LatencyMS   float64       `json:"latency_ms"`
-	Error       string        `json:"error,omitempty"`
+	Enabled     bool            `json:"enabled"`
+	GxAvailable bool            `json:"gx_available"`
+	NTokens     int             `json:"n_tokens"`
+	HiddenDim   int             `json:"hidden_dim"`
+	Layer       string          `json:"layer"`
+	Aggregate   lensAggregate   `json:"aggregate"`
+	LatencyMS   float64         `json:"latency_ms"`
+	Thresholds  *lensThresholds `json:"thresholds,omitempty"`
+	Error       string          `json:"error,omitempty"`
+}
+
+// lowThreshold / severeThreshold resolve the regression thresholds for a score:
+// the per-model values from the lens service when present, else the hardcoded
+// fallback constants (older lenses that don't bundle thresholds).
+func (r lensPerStepResult) lowThreshold() float64 {
+	if r.Thresholds != nil && r.Thresholds.Low > 0 {
+		return r.Thresholds.Low
+	}
+	return lensLowScoreThreshold
+}
+
+func (r lensPerStepResult) severeThreshold() float64 {
+	if r.Thresholds != nil && r.Thresholds.Severe > 0 {
+		return r.Thresholds.Severe
+	}
+	return lensSevereThreshold
 }
 
 // scoreContentForAgent calls /internal/lens/score-per-step on the given
@@ -171,16 +199,18 @@ func extractFailurePath(toolName string, args json.RawMessage) string {
 // values are all below lensLowScoreThreshold. This is the "model is
 // stuck on a stub or near-duplicate response" signature — the May 6
 // resources.html loop is the canonical example.
-func agentLensRegression(history []float64) (string, bool) {
+// low and severe are the per-model thresholds (resolved from the lens score's
+// bundled thresholds, falling back to the package constants).
+func agentLensRegression(history []float64, low, severe float64) (string, bool) {
 	if len(history) == 0 {
 		return "", false
 	}
-	// Severe single-write short-circuit: gx_min below lensSevereThreshold
-	// (~0.05) is so far into the "likely_incorrect" band that one sample
-	// is enough — don't wait for a second confirmation while V3's
-	// sandbox-verifier rubber-stamps the stub in the same iteration.
+	// Severe single-write short-circuit: gx_min below the severe threshold
+	// is so far into the "likely_incorrect" band that one sample is enough —
+	// don't wait for a second confirmation while V3's sandbox-verifier
+	// rubber-stamps the stub in the same iteration.
 	last := history[len(history)-1]
-	if last < lensSevereThreshold {
+	if last < severe {
 		return fmt.Sprintf(
 			"⚠ Lens severe-quality alert: the geometric lens scored your last write at "+
 				"gx_min=%.3f, which is in the unambiguously-bad band (<%.2f). This usually "+
@@ -190,7 +220,7 @@ func agentLensRegression(history []float64) (string, bool) {
 				"clarification on what concrete content is needed, or (c) skip this file and "+
 				"move on if it's not blocking the verify step. DO NOT re-issue the same "+
 				"write — the lens will catch it again.",
-			last, lensSevereThreshold), true
+			last, severe), true
 	}
 	// Run-of-N moderate-low check: lensRegressionRunLength consecutive
 	// scores below lensLowScoreThreshold (~0.15). Catches gradual stub
@@ -201,7 +231,7 @@ func agentLensRegression(history []float64) (string, bool) {
 	}
 	recent := history[len(history)-lensRegressionRunLength:]
 	for _, score := range recent {
-		if score >= lensLowScoreThreshold {
+		if score >= low {
 			return "", false
 		}
 	}

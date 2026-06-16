@@ -145,6 +145,28 @@ stops at the one step only you can do (the rebuild); the manual flow is:
    llama-server + geometric-lens are network dependencies. For scripted use,
    `scripts/retrain_lens_from_results.py --results-dir <dir>` remains available
    and resolves its ports the same way.)
+
+   **Per-model operating thresholds.** The lens `G(x)` score scale is
+   model-specific — one model's grounded writes may cluster at 0.05, another's
+   at 0.45 — so a single hardcoded off-rails/regression cutoff fires for one
+   model and never for another. Each lens therefore carries its own thresholds
+   in `gx_thresholds.json` alongside the artifact:
+   ```json
+   { "off_rails": 0.30, "low": 0.15, "severe": 0.05 }
+   ```
+   The lens service loads it per-model and returns the values in every score
+   response; the proxy uses them for its run-of-N / severe regression checks.
+   `off_rails` is the per-token "stop generating" cutoff; `low` is the
+   aggregate `gx_min` that counts as a low-quality write (run-of-2 → corrective);
+   `severe` is the single-write cutoff that intervenes immediately. **If the
+   file is absent the service falls back to those defaults** (Qwen-calibrated),
+   which is why a model whose scores sit higher (e.g. Gemma at 0.37–0.55) shows
+   no lens intervention until its own thresholds are calibrated. Calibrate them
+   from the same labeled candidates used in step 2 — pick cutoffs from the
+   `pass`/`fail` `gx_min` distributions (e.g. `severe` ≈ the 5th percentile of
+   `fail`, `low` ≈ where pass/fail separate) — and write `gx_thresholds.json`
+   into `geometric-lens/geometric_lens/models/`. It publishes/downloads with the
+   rest of the lens artifacts.
    Do **not** reuse another model's solution set — both lens halves are
    dimension-coupled to the model: `C(x)` must learn *this* model's cost
    geometry, and `G(x)`'s PCA projection is shaped to the embedding width.

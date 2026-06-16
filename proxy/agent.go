@@ -811,7 +811,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 						"gx_score_mean":        score.Aggregate.GxScoreMean,
 						"latency_ms":           score.LatencyMS,
 					})
-					if msg, intervene := agentLensRegression(ctx.LensScoreHistory); intervene {
+					if msg, intervene := agentLensRegression(ctx.LensScoreHistory, score.lowThreshold(), score.severeThreshold()); intervene {
 						log.Printf("[agent] lens regression at turn %d on %s — queuing corrective for next turn", turn, parsed.Name)
 						ctx.Stream("agent_lens_intervention", map[string]interface{}{
 							"turn":   turn,
