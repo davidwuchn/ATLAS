@@ -58,13 +58,26 @@ type agentRequest struct {
 // immediately on connection failure. The TCP-disconnect path in the
 // chat client is the primary cancel mechanism; this is defense-in-depth
 // for cases where a reverse proxy buffers the disconnect.
-// submitFeedback posts a pass-level 👍/👎 to the proxy, which turns the pass's
-// writes into labeled lens-training samples. Returns the number recorded.
-func submitFeedback(proxyURL, sessionID, thumbs string) (int, error) {
+// fileVerdict is a per-file accept/deny for the post-pass review. Shape MUST
+// match the proxy's /feedback `files` entries.
+type fileVerdict struct {
+	Path    string `json:"path"`
+	Verdict string `json:"verdict"` // "accept" | "deny"
+}
+
+// submitFeedback posts a pass verdict to the proxy, which turns the pass's
+// writes into labeled lens-training samples. `thumbs` is the pass-level 👍/👎;
+// `files` carries any per-file accept/deny (deny → confident negative; the
+// rest ride the thumbs weight). Returns the number of samples recorded.
+func submitFeedback(proxyURL, sessionID, thumbs string, files []fileVerdict) (int, error) {
 	if sessionID == "" {
 		return 0, fmt.Errorf("no completed pass to rate yet")
 	}
-	body, _ := json.Marshal(map[string]string{"session_id": sessionID, "thumbs": thumbs})
+	payload := map[string]interface{}{"session_id": sessionID, "thumbs": thumbs}
+	if len(files) > 0 {
+		payload["files"] = files
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST",
 		strings.TrimRight(proxyURL, "/")+"/feedback", bytes.NewReader(body))
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -91,7 +92,16 @@ type tuiModel struct {
 	// retrainNotified gates the "retrain available" banner to once per TUI
 	// session so it doesn't repeat on every subsequent turn.
 	retrainNotified bool
-	chatRenderer    *glamour.TermRenderer
+	// Post-pass review state. passWrites accumulates the files written during
+	// the in-flight pass; on completion it becomes lastPassFiles (what /review
+	// lists and /good·/bad rate). passVerdicts holds per-file deny verdicts the
+	// user set for the last pass (path → "deny"), with optional reasons for
+	// /redo. All cleared when a new pass starts.
+	passWrites   map[string]bool
+	lastPassFiles []string
+	passVerdicts map[string]string
+	passReasons  map[string]string
+	chatRenderer *glamour.TermRenderer
 
 	// Set when the user presses Ctrl+C mid-turn so the trailing flurry
 	// of error/llm_call_end/__turn_done__ events render as "cancelled"
@@ -510,6 +520,12 @@ func (m *tuiModel) sendChatCmd(message string) tea.Cmd {
 	m.turnSessionID = sessionID
 	m.turnActive = true
 	m.userCancelled = false // fresh turn — clear the cancel sticky flag
+	// Fresh pass: reset post-pass review state so verdicts/writes don't leak
+	// from the previously-rated pass into this one.
+	m.passWrites = map[string]bool{}
+	m.passVerdicts = map[string]string{}
+	m.passReasons = map[string]string{}
+	m.lastPassFiles = nil
 
 	proxyURL := m.proxyURL
 	workingDir := m.workingDir
@@ -840,6 +856,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.turnActive = false
 			// The just-finished pass is now rateable via /good and /bad.
 			m.lastPassSession = m.turnSessionID
+			// Freeze the pass's written files for /review and per-file verdicts.
+			m.lastPassFiles = m.lastPassFiles[:0]
+			for p := range m.passWrites {
+				m.lastPassFiles = append(m.lastPassFiles, p)
+			}
+			sort.Strings(m.lastPassFiles)
 			var p struct {
 				Err string `json:"err"`
 			}
@@ -1261,6 +1283,15 @@ func (m *tuiModel) appendChatEvent(ev chatEvent) {
 					m.modifiedFiles[path] = true
 					// Force-expire the debounce so the next tick scans.
 					m.lastFileScan = time.Time{}
+					// Track content writes for post-pass review (delete isn't a
+					// lens sample). The path here matches what the proxy keys
+					// /feedback verdicts by, so /deny <path> lines up.
+					if p.Name != "delete_file" {
+						if m.passWrites == nil {
+							m.passWrites = map[string]bool{}
+						}
+						m.passWrites[path] = true
+					}
 				}
 			}
 		}

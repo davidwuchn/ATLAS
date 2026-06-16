@@ -155,6 +155,10 @@ the last message; pass an integer for the last N messages).
 | `/run <cmd>` | Run a shell command in the working dir; output appears in chat |
 | `/good` | 👍 the last completed pass — bank its writes as positive lens-training samples |
 | `/bad` | 👎 the last completed pass — bank its writes as negative lens-training samples |
+| `/review` | List the files the last pass wrote, with any per-file verdicts |
+| `/deny <path> [reason]` | Mark one file from the last pass bad (a confident negative); submitted on the next `/good`/`/bad` |
+| `/accept <path>` | Undo a `/deny` |
+| `/redo <path> [reason]` | Ask the agent to regenerate a rejected file (reuses the `/deny` reason) |
 | `/clear` | Clear chat history (session token counter is preserved) |
 | `/compact` | Ask the agent to summarize the conversation in 3-4 sentences |
 | `/hide <pane>` | Hide a pane: `files`, `pipeline`, `events`, or `all` |
@@ -171,8 +175,12 @@ them on demand. No file content is sent eagerly.
 
 `/good` and `/bad` rate the most recently completed pass. The proxy turns
 that pass's writes into labeled, weighted lens-training samples (collected
-under `ATLAS_LENS_DATA_DIR`). As they accumulate, the TUI shows a one-time
-**"🧠 Lens retrain available"** banner with the command to run
+under `ATLAS_LENS_DATA_DIR`). For finer control, `/review` lists the pass's
+files and `/deny <path>` marks individual ones bad — so a thumbs-up pass with
+one denied file banks the good files as positives and the denied one as a
+confident negative (the per-file verdict overrides the pass thumbs). `/redo`
+asks the agent to regenerate a rejected file. As samples accumulate, the TUI
+shows a one-time **"🧠 Lens retrain available"** banner with the command to run
 (`atlas lens retrain`), which retrains the lens on your own workloads. See
 [CONFIGURATION.md](CONFIGURATION.md) (lens onboarding) for the full loop.
 

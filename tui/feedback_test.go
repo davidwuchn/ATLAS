@@ -26,7 +26,7 @@ func TestSubmitFeedbackPostsThumbs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n, err := submitFeedback(srv.URL, "sess-9", "down")
+	n, err := submitFeedback(srv.URL, "sess-9", "down", nil)
 	if err != nil {
 		t.Fatalf("submitFeedback: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestSubmitFeedbackPostsThumbs(t *testing.T) {
 }
 
 func TestSubmitFeedbackNoSession(t *testing.T) {
-	if _, err := submitFeedback("http://localhost:9", "", "up"); err == nil {
+	if _, err := submitFeedback("http://localhost:9", "", "up", nil); err == nil {
 		t.Errorf("expected error for empty session id")
 	}
 }
@@ -89,6 +89,63 @@ func TestSlashGoodDispatchesFeedback(t *testing.T) {
 	}
 	if res.err != nil || !strings.Contains(res.output, "banked") {
 		t.Errorf("result = %+v", res)
+	}
+}
+
+// /deny marks one file bad; the following /good submits a thumbs-up pass with
+// that file as a per-file deny (the "good pass, one bad file" case).
+func TestSlashDenyThenGoodSendsPerFileVerdict(t *testing.T) {
+	var body struct {
+		Thumbs string        `json:"thumbs"`
+		Files  []fileVerdict `json:"files"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		w.Write([]byte(`{"recorded":2}`))
+	}))
+	defer srv.Close()
+
+	m := newTUIModel(srv.URL)
+	m.lastPassSession = "sess-3"
+	m.lastPassFiles = []string{"app.py", "stub.py"}
+
+	if _, cmd, _ := m.handleSlash("/deny stub.py wrong approach"); cmd != nil {
+		t.Errorf("/deny should not return a cmd (records locally)")
+	}
+	if m.passVerdicts["stub.py"] != "deny" {
+		t.Fatalf("/deny didn't record the verdict: %+v", m.passVerdicts)
+	}
+	if m.passReasons["stub.py"] != "wrong approach" {
+		t.Errorf("/deny didn't keep the reason: %+v", m.passReasons)
+	}
+
+	_, cmd, _ := m.handleSlash("/good")
+	if cmd == nil {
+		t.Fatal("/good returned no cmd")
+	}
+	cmd()
+	if body.Thumbs != "up" {
+		t.Errorf("thumbs = %q, want up", body.Thumbs)
+	}
+	if len(body.Files) != 1 || body.Files[0].Path != "stub.py" || body.Files[0].Verdict != "deny" {
+		t.Errorf("files = %+v, want one deny on stub.py", body.Files)
+	}
+	// Verdicts cleared after submit.
+	if len(m.passVerdicts) != 0 {
+		t.Errorf("passVerdicts should be cleared after /good, got %+v", m.passVerdicts)
+	}
+}
+
+func TestSlashAcceptUndoesDeny(t *testing.T) {
+	m := newTUIModel("http://unused")
+	m.handleSlash("/deny app.py")
+	if m.passVerdicts["app.py"] != "deny" {
+		t.Fatal("deny not recorded")
+	}
+	m.handleSlash("/accept app.py")
+	if _, ok := m.passVerdicts["app.py"]; ok {
+		t.Errorf("/accept should remove the deny verdict")
 	}
 }
 
