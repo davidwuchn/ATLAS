@@ -84,7 +84,14 @@ type tuiModel struct {
 	turnActive     bool
 	turnCancel     context.CancelFunc
 	turnSessionID  string
-	chatRenderer   *glamour.TermRenderer
+	// lastPassSession is the session id of the most recently COMPLETED pass —
+	// what /good and /bad rate. Distinct from turnSessionID (which a new turn
+	// overwrites at send time); set when a turn finishes.
+	lastPassSession string
+	// retrainNotified gates the "retrain available" banner to once per TUI
+	// session so it doesn't repeat on every subsequent turn.
+	retrainNotified bool
+	chatRenderer    *glamour.TermRenderer
 
 	// Set when the user presses Ctrl+C mid-turn so the trailing flurry
 	// of error/llm_call_end/__turn_done__ events render as "cancelled"
@@ -831,6 +838,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatStreamMsg:
 		if msg.ev.Type == "__turn_done__" {
 			m.turnActive = false
+			// The just-finished pass is now rateable via /good and /bad.
+			m.lastPassSession = m.turnSessionID
 			var p struct {
 				Err string `json:"err"`
 			}
@@ -842,6 +851,22 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 			dlog("turn", "ended", map[string]interface{}{"err": p.Err})
+			// Check (once per session) whether enough labeled samples have
+			// accumulated to offer a lens retrain. Async so it never blocks
+			// the UI; the result arrives as a lensRetrainStatusMsg.
+			if !m.retrainNotified {
+				proxyURL := m.proxyURL
+				return m, tea.Batch(
+					waitForChatEvent(m.chatEvents),
+					func() tea.Msg {
+						ts, err := fetchTrainingStatus(proxyURL)
+						if err != nil {
+							return nil
+						}
+						return lensRetrainStatusMsg{ts}
+					},
+				)
+			}
 		} else {
 			// Skip dlog for llm_token — at ~30 tok/s a long generation
 			// produces thousands of entries and crowds out actually
@@ -879,6 +904,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			"command": msg.command, "ok": msg.err == nil,
 			"output_len": len(msg.output),
 		})
+		return m, nil
+
+	case lensRetrainStatusMsg:
+		// Surface the retrain prompt once per session when enough labeled
+		// samples have accumulated. Tells the user the exact command to run.
+		if msg.status.RetrainAvailable && !m.retrainNotified {
+			m.retrainNotified = true
+			m.chat = append(m.chat, chatMessage{
+				Role: roleSystem, Meta: "lens",
+				Body: fmt.Sprintf(
+					"🧠 Lens retrain available — %d labeled samples collected (%d 👍 / %d 👎). "+
+						"Run `%s` to boost the lens on your own workloads.",
+					msg.status.Total, msg.status.Good, msg.status.Bad, msg.status.Command),
+			})
+		}
 		return m, nil
 
 	case tickMsg:

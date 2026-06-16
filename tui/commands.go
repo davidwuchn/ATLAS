@@ -124,6 +124,8 @@ const slashCommandHelp = `Slash commands
   /commit [msg]           Stage all changes and create a commit.
   /undo                   Revert the last commit (keep changes in tree).
   /run <cmd>              Run a shell command in the working dir.
+  /good                   👍 the last pass — bank it as lens-training data.
+  /bad                    👎 the last pass — bank it as a negative example.
   /clear                  Clear the chat history (keeps session tokens).
   /compact                Ask the agent to compact conversation history.
   /hide <pane>            Hide a pane: files, pipeline, events, or all.
@@ -249,6 +251,31 @@ func (m *tuiModel) handleSlash(input string) (consumed bool, cmd tea.Cmd, quit b
 		// Pass the rest as a single shell string so quoting/pipes work.
 		return true, runShellCmd(m.workingDir, "/run",
 			[]string{"bash", "-lc", strings.Join(args, " ")}), false
+
+	case "/good", "/bad":
+		// Rate the last completed pass 👍/👎. The proxy turns that pass's
+		// writes into labeled lens-training samples (thumbs-only mode); over
+		// time the corpus feeds `atlas lens retrain` to boost the lens on your
+		// own workloads.
+		thumbs, face := "up", "👍"
+		if cmdName == "/bad" {
+			thumbs, face = "down", "👎"
+		}
+		sid := m.lastPassSession
+		proxyURL := m.proxyURL
+		return true, func() tea.Msg {
+			n, err := submitFeedback(proxyURL, sid, thumbs)
+			if err != nil {
+				return slashResultMsg{command: cmdName, err: err,
+					output: "Couldn't record feedback: " + err.Error()}
+			}
+			if n == 0 {
+				return slashResultMsg{command: cmdName,
+					output: "Nothing to rate — no writes in the last pass (or it was already rated)."}
+			}
+			return slashResultMsg{command: cmdName, output: fmt.Sprintf(
+				"%s recorded — %d write(s) from the last pass banked for lens training.", face, n)}
+		}, false
 
 	case "/clear":
 		m.chat = nil

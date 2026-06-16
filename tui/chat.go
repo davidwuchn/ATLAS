@@ -58,6 +58,71 @@ type agentRequest struct {
 // immediately on connection failure. The TCP-disconnect path in the
 // chat client is the primary cancel mechanism; this is defense-in-depth
 // for cases where a reverse proxy buffers the disconnect.
+// submitFeedback posts a pass-level 👍/👎 to the proxy, which turns the pass's
+// writes into labeled lens-training samples. Returns the number recorded.
+func submitFeedback(proxyURL, sessionID, thumbs string) (int, error) {
+	if sessionID == "" {
+		return 0, fmt.Errorf("no completed pass to rate yet")
+	}
+	body, _ := json.Marshal(map[string]string{"session_id": sessionID, "thumbs": thumbs})
+	req, err := http.NewRequest("POST",
+		strings.TrimRight(proxyURL, "/")+"/feedback", bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tok := loadBearerToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Recorded int `json:"recorded"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&r)
+	return r.Recorded, nil
+}
+
+// trainingStatus mirrors the proxy's /v1/lens/training-status payload.
+type trainingStatus struct {
+	Total            int    `json:"total"`
+	Good             int    `json:"good"`
+	Bad              int    `json:"bad"`
+	Threshold        int    `json:"threshold"`
+	RetrainAvailable bool   `json:"retrain_available"`
+	Command          string `json:"command"`
+}
+
+// lensRetrainStatusMsg carries a training-status poll result back to Update
+// (after a pass completes) so the model can surface the "retrain available"
+// banner without blocking on the HTTP call.
+type lensRetrainStatusMsg struct{ status trainingStatus }
+
+// fetchTrainingStatus asks the proxy how many labeled samples have accumulated
+// and whether a retrain is worth offering. Best-effort: errors are returned so
+// the caller can simply skip the banner.
+func fetchTrainingStatus(proxyURL string) (trainingStatus, error) {
+	var ts trainingStatus
+	req, err := http.NewRequest("GET",
+		strings.TrimRight(proxyURL, "/")+"/v1/lens/training-status", nil)
+	if err != nil {
+		return ts, err
+	}
+	if tok := loadBearerToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return ts, err
+	}
+	defer resp.Body.Close()
+	err = json.NewDecoder(resp.Body).Decode(&ts)
+	return ts, err
+}
+
 func cancelTurn(proxyURL, sessionID string) error {
 	if sessionID == "" {
 		return fmt.Errorf("empty session id")

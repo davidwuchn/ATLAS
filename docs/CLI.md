@@ -153,6 +153,8 @@ the last message; pass an integer for the last N messages).
 | `/commit [msg]` | Stage all changes and create a commit (default msg if omitted) |
 | `/undo` | `git reset --soft HEAD~1` — revert the last commit, keep changes |
 | `/run <cmd>` | Run a shell command in the working dir; output appears in chat |
+| `/good` | 👍 the last completed pass — bank its writes as positive lens-training samples |
+| `/bad` | 👎 the last completed pass — bank its writes as negative lens-training samples |
 | `/clear` | Clear chat history (session token counter is preserved) |
 | `/compact` | Ask the agent to summarize the conversation in 3-4 sentences |
 | `/hide <pane>` | Hide a pane: `files`, `pipeline`, `events`, or `all` |
@@ -166,6 +168,13 @@ The `/add /drop /context` set is TUI-side state — file paths are
 appended to outgoing messages as a hint
 (`[atlas-tui context: foo.go, bar.go]`) so the agent can `read_file`
 them on demand. No file content is sent eagerly.
+
+`/good` and `/bad` rate the most recently completed pass. The proxy turns
+that pass's writes into labeled, weighted lens-training samples (collected
+under `ATLAS_LENS_DATA_DIR`). As they accumulate, the TUI shows a one-time
+**"🧠 Lens retrain available"** banner with the command to run
+(`atlas lens retrain`), which retrains the lens on your own workloads. See
+[CONFIGURATION.md](CONFIGURATION.md) (lens onboarding) for the full loop.
 
 ---
 
