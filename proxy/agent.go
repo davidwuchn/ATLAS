@@ -795,6 +795,10 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 			// kept retrying the same stub.
 			pendingLensCorrective := ""
 			if scorable, ok := extractScorableContent(parsed.Name, parsed.Args); ok {
+				// Capture the model's write for deferred lens-training labeling
+				// (a later /feedback call turns it into a weighted sample). Same
+				// content the lens scores below, so a sample mirrors its score.
+				ctx.RecordPassWrite(parsed.Name, extractFailurePath(parsed.Name, parsed.Args), scorable)
 				if score, scored := scoreContentForAgent(ctx.Ctx, ctx.LensURL, scorable); scored {
 					ctx.LensScoreHistory = append(ctx.LensScoreHistory, score.Aggregate.GxScoreMin)
 					log.Printf("[agent] lens turn=%d tool=%s gx_min=%.3f gx_mean=%.3f off_rails=%d n_tok=%d latency=%.0fms history=%s",
@@ -2353,6 +2357,7 @@ func handleAgent(w http.ResponseWriter, r *http.Request) {
 	reqCtx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	ctx.Ctx = reqCtx
+	ctx.PassID = req.SessionID
 	if req.SessionID != "" {
 		activeSessions.Store(req.SessionID, cancel)
 		defer activeSessions.Delete(req.SessionID)
@@ -2428,6 +2433,11 @@ func handleAgent(w http.ResponseWriter, r *http.Request) {
 		// embedded in err.Error() can't fake additional log entries.
 		log.Printf("[agent] error: %q", err.Error())
 	}
+
+	// Stash this pass's writes for deferred /feedback labeling (lens training
+	// data). Keyed by session id; a later thumbs / per-file verdict turns them
+	// into weighted samples. No-op when the pass wrote nothing or has no id.
+	stashPendingPass(req.SessionID, modelName, ctx.PassWrites)
 
 	// Send final done event
 	fmt.Fprintf(w, "data: [DONE]\n\n")

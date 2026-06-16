@@ -470,6 +470,18 @@ type AgentContext struct {
 	// stemmed from the guard refusing the model's self-correction).
 	SessionWrites map[string]bool
 
+	// PassWrites records the model-authored content of each write this pass
+	// (write_file / edit_file / ast_edit), for lens training-data collection.
+	// On pass completion the writes are stashed by session id; a later
+	// /feedback call (per-file accept/deny + pass thumbs) turns them into
+	// labeled, weighted lens samples. Captured at the same point the lens
+	// scores the content, so a sample mirrors exactly what the lens saw.
+	PassWrites []PassWrite
+
+	// PassID identifies this prompt-pass (the session id from the request) so
+	// deferred /feedback can find this pass's writes after the loop returns.
+	PassID string
+
 	// PC-207 agent-loop integration: rolling list of gx_score_min values
 	// from lens scoring of write_file/edit_file tool calls. When the
 	// recent N values all fall below lensLowScoreThreshold the loop
@@ -571,6 +583,22 @@ func (c *AgentContext) RecordFileRead(path string, content string) {
 	defer c.mu.Unlock()
 	c.FileReadTimes[path] = time.Now()
 	c.FilesRead[path] = content
+}
+
+// RecordPassWrite appends a model-authored write to this pass's collection
+// list, for deferred lens-training labeling. Last-write-wins per path so a
+// file the model rewrote several times in one pass yields one sample (its
+// final content), not several near-duplicates.
+func (c *AgentContext) RecordPassWrite(tool, path, content string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.PassWrites {
+		if c.PassWrites[i].Path == path {
+			c.PassWrites[i] = PassWrite{Tool: tool, Path: path, Content: content}
+			return
+		}
+	}
+	c.PassWrites = append(c.PassWrites, PassWrite{Tool: tool, Path: path, Content: content})
 }
 
 // WasFileRead returns true if the file was read during this agent session.
