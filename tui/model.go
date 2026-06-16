@@ -873,6 +873,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 			dlog("turn", "ended", map[string]interface{}{"err": p.Err})
+			// Post-pass rate prompt — make the thumbs feature discoverable.
+			// Only when the pass actually produced writes (something to rate)
+			// and it wasn't cancelled/errored.
+			if len(m.lastPassFiles) > 0 && p.Err == "" && !m.userCancelled {
+				m.chat = append(m.chat, chatMessage{
+					Role: roleSystem, Meta: "rate",
+					Body: fmt.Sprintf(
+						"Rate this pass → 👍 /good · 👎 /bad · 🔍 /review (%d file(s) written) — trains the lens on your workloads.",
+						len(m.lastPassFiles)),
+				})
+			}
 			// Check (once per session) whether enough labeled samples have
 			// accumulated to offer a lens retrain. Async so it never blocks
 			// the UI; the result arrives as a lensRetrainStatusMsg.

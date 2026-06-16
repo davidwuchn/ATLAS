@@ -2140,13 +2140,24 @@ def _ast_selector_to_query(selector: str, language: str):
         if s.startswith("<") and s.endswith(">") and len(s) > 2:
             tag = s[1:-1].strip().lower()
             if not tag.replace("-", "").replace("_", "").isalnum():
-                return None, None, f"selector '{selector}' has invalid tag name"
+                return None, None, (
+                    f"selector '{selector}' has invalid tag name — use a bare "
+                    f"tag like <script> or <body>, not attributes"
+                )
+            # tree-sitter-html parses <script> and <style> as dedicated
+            # script_element / style_element nodes (their bodies are raw
+            # JS/CSS, not HTML), NOT generic `element` nodes — so the generic
+            # element query matches them 0 times. Target their real node type.
+            if tag == "script":
+                return "(script_element) @target", "target", None
+            if tag == "style":
+                return "(style_element) @target", "target", None
             return (
                 f'(element (start_tag (tag_name) @_tag (#eq? @_tag "{tag}"))) @target',
                 "target", None,
             )
         return None, None, (
-            f"unknown selector '{selector}' for html. Supported: <tag> (e.g. <body>, <head>, <h1>)"
+            f"unknown selector '{selector}' for html. Supported: <tag> (e.g. <body>, <head>, <h1>, <script>, <style>)"
         )
     return None, None, f"unsupported language: {language}"
 
