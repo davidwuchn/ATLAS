@@ -46,6 +46,7 @@
 
 ### Documentation
 - Added multilingual documentation: Simplified Chinese (zh-CN), Japanese (ja), Korean (ko) for README, SETUP, and TROUBLESHOOTING
+- Translated ARCHITECTURE.md to zh-CN / ja / ko (#25); added a language switcher to the English ARCHITECTURE.md
 - Added language selector badges to README
 - Added star history chart to Latest News section
 - Rewrote README contributing section to encourage issue reports and community feedback
