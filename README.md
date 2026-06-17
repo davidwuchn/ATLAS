@@ -31,6 +31,7 @@ Open models historically can't keep up with hosted ones. ATLAS gets there anyway
 
 ## 🔥 Latest News
 
+- **2026-06-17** - **[V3.1.2 "Maia" released](https://github.com/itigges22/ATLAS/releases/tag/v3.1.2)** - broader hardware reach (ROCm / Metal / Vulkan), bring-your-own-model Lens + ASA training, in-the-loop lens retraining from your own workloads, and an agent-reliability pass
 - **2026-05-12** - **[V3.1.0 "Maia" released](https://github.com/itigges22/ATLAS/releases/tag/v3.1.0)** - native Bubbletea TUI, one-command bootstrap, streaming Lens + ASA activation steering, AST-aware surgical edits
 - **2026-04-13** - ["How to Run an AI Coding Assistant on a $500 GPU and Beat Claude Sonnet"](https://devtrends.ru/python/itigges22-atlas) - devtrends.ru
 - **2026-04-05** - **[V3.0.1 released](CHANGELOG.md)** - interactive CLI, Docker Compose deployment, 95.8% reliability
@@ -122,31 +123,26 @@ Apple Silicon runs natively through the macOS hybrid Metal path (native llama-se
 ## ⚠️ Known Limitations
 
 - **Linux Docker stack, plus a native macOS path.** NVIDIA, AMD ROCm, and Vulkan Docker paths ship today; Apple Silicon runs via the native macOS hybrid Metal path ([#32](https://github.com/itigges22/ATLAS/issues/32)). Intel Arc / SYCL is on the roadmap.
-- **9B model is not formally benchmarked yet.** V3.1.0 ships Qwen3.5-9B with the full V3 pipeline, but the canonical 74.6% LiveCodeBench score is from the 14B reference build. Formal 9B numbers land with V3.1.1. The 14B methodology and ablations live in [`docs/reports/V3_ABLATION_STUDY.md`](docs/reports/V3_ABLATION_STUDY.md); raw traces are on [HuggingFace](https://huggingface.co/datasets/itigges22/ATLAS).
-- **Complex feature additions can be inconsistent.** The model sometimes spends agent turns exploring an unfamiliar codebase before writing code. Reliability has improved on the 9B build since the V3.0 measurement; a fresh number lands with the V3.1.1 benchmark pass.
+- **9B model is not formally benchmarked yet.** ATLAS ships Qwen3.5-9B with the full V3 pipeline, but the canonical 74.6% LiveCodeBench score is from the 14B reference build. Formal 9B numbers are tracked in [#28](https://github.com/itigges22/ATLAS/issues/28). The 14B methodology and ablations live in [`docs/reports/V3_ABLATION_STUDY.md`](docs/reports/V3_ABLATION_STUDY.md); raw traces are on [HuggingFace](https://huggingface.co/datasets/itigges22/ATLAS).
+- **Complex feature additions can be inconsistent.** The model sometimes spends agent turns exploring an unfamiliar codebase before writing code. Reliability has improved markedly on the 9B build through the V3.1.2 agent-reliability pass; a fresh formal number is tracked in [#28](https://github.com/itigges22/ATLAS/issues/28).
 - **Grammar-constrained decoding is slow.** Around 51 tok/s on llama-server.
 
 ---
 
 ## 🗺️ Roadmap
 
-**V3.1.0** - Current release. Bubbletea TUI as the canonical chat client (PC-062), `atlas init` first-run wizard (PC-054), `atlas doctor` install diagnostic (PC-053), `atlas tier` hardware-aware presets (PC-055), K3s deployment templates restored, ASA steering vectors auto-built during install (BiasBusters #4).
-
-**V3.1.1** - Broader hardware reach (landed on `main`).
-- AMD ROCm via llama.cpp — including RDNA4 / RX 9070 (gfx1200/gfx1201) and community-verified cards ([#26](https://github.com/itigges22/ATLAS/issues/26)).
-- Apple Silicon — native macOS hybrid Metal path: native llama-server for inference perf, Docker for the rest of the stack ([#32](https://github.com/itigges22/ATLAS/issues/32), see [SETUP_MACOS.md](docs/SETUP_MACOS.md)).
-- Vulkan universal fallback — one image covering AMD / Intel / Snapdragon / Apple-via-MoltenVK / CPU ([#114](https://github.com/itigges22/ATLAS/issues/114)).
-- Formal 9B benchmarks — LiveCodeBench, GPQA Diamond, SciCode on Qwen3.5-9B (in progress, [#28](https://github.com/itigges22/ATLAS/issues/28)).
-
-**V3.1.2** - Next point release: bring-your-own-model + cluster.
-- ASA per-model calibration parity ([#113](https://github.com/itigges22/ATLAS/issues/113)) and local Lens training pipeline ([#100](https://github.com/itigges22/ATLAS/issues/100)) — train ASA / Lens artifacts for non-default GGUFs.
-- Automated HuggingFace submission pipeline ([#102](https://github.com/itigges22/ATLAS/issues/102)).
-- ROCm on K3s / Kubernetes — `/dev/kfd` + `/dev/dri` hostPath mounts and `render`/`video` group membership in the Pod spec (the cluster equivalent of `docker-compose.rocm.yml`).
+**V3.1.2 "Maia"** - Current release. Broader hardware reach, bring-your-own-model training, and an agent-reliability pass on top of the V3.1.0 base (TUI, one-command install, streaming Lens + ASA).
+- Hardware reach: AMD ROCm via llama.cpp incl. RDNA4 / RX 9070 (gfx1200/gfx1201) ([#26](https://github.com/itigges22/ATLAS/issues/26)); Apple Silicon native macOS hybrid Metal path ([#32](https://github.com/itigges22/ATLAS/issues/32), see [SETUP_MACOS.md](docs/SETUP_MACOS.md)); Vulkan universal fallback covering AMD / Intel / Snapdragon / Apple-via-MoltenVK / CPU ([#114](https://github.com/itigges22/ATLAS/issues/114)).
+- Bring-your-own-model: local Lens training pipeline (`atlas lens build` / `retrain`, [#100](https://github.com/itigges22/ATLAS/issues/100)) and ASA per-model calibration parity (`atlas asa check/build/publish`, [#113](https://github.com/itigges22/ATLAS/issues/113)) — train Lens + ASA artifacts for non-default GGUFs, with per-model operating thresholds that ship with the lens.
+- In-the-loop lens training: rate passes in the TUI (`/good` · `/bad` · `/review` · `/deny`) → collected, weighted samples → `atlas lens retrain` on your own workloads.
+- Agent reliability: tool-result visibility fix, read-dedup, traceback → directed-edit, `move_file`, pip-install / case-mismatch steers, sandbox shell policy + host-sized cgroup limits.
+- Structural call-graph reasoning ([#39](https://github.com/itigges22/ATLAS/issues/39) / [#125](https://github.com/itigges22/ATLAS/pull/125), thanks [@yogthos](https://github.com/yogthos)); ARCHITECTURE.md translated to zh-CN / ja / ko ([#25](https://github.com/itigges22/ATLAS/issues/25)).
 
 **V3.2** - Next milestone: deeper code reasoning and planning.
-- Architecture-first planning phase — RPG-style plan-then-fill: plan at module scope, then implement at function scope ([#120](https://github.com/itigges22/ATLAS/issues/120)).
-- Structural code reasoning — call graph + reachability via tree-sitter, plus syntax-agnostic wavelet feature decomposition for multi-resolution "which files matter" retrieval ([#39](https://github.com/itigges22/ATLAS/issues/39)).
+- Architecture-first planning phase — RPG-style plan-then-fill: plan at module scope, then implement at function scope ([#120](https://github.com/itigges22/ATLAS/issues/120), PR [#124](https://github.com/itigges22/ATLAS/pull/124)).
+- Structural code reasoning (tail) — solver-backed reachability + syntax-agnostic wavelet decomposition for multi-resolution "which files matter" retrieval ([#39](https://github.com/itigges22/ATLAS/issues/39)).
 - Reasoning with sampling — efficiency and quality gains ([#9](https://github.com/itigges22/ATLAS/issues/9)).
+- Deferred infra: automated HuggingFace submission pipeline ([#102](https://github.com/itigges22/ATLAS/issues/102)); ROCm on K3s / Kubernetes; formal 9B benchmarks — LiveCodeBench, GPQA Diamond, SciCode ([#28](https://github.com/itigges22/ATLAS/issues/28)).
 
 **Backlog / help wanted**
 - Hardware: ARM64 multi-arch builds ([#115](https://github.com/itigges22/ATLAS/issues/115)), multi-GPU for larger models ([#34](https://github.com/itigges22/ATLAS/issues/34)), Intel oneAPI / SYCL ([#27](https://github.com/itigges22/ATLAS/issues/27)).
