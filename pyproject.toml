@@ -1,6 +1,6 @@
 [project]
 name = "atlas"
-version = "3.1.0"
+version = "3.1.2"
 description = "Adaptive Test-time Learning and Autonomous Specialization"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.9"

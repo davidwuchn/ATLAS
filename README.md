@@ -7,9 +7,9 @@
 <p align="center"><b>Adaptive Test-time Learning and Autonomous Specialization</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-V3.1.0-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-V3.1.2-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"/>
-  <img src="https://img.shields.io/badge/model-Qwen3.5--9B-green" alt="Model"/>
+  <img src="https://img.shields.io/badge/model-agnostic-green" alt="Model-agnostic"/>
 </p>
 
 <p align="center">

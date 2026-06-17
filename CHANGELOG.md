@@ -2,7 +2,12 @@
 
 > This changelog is maintained as a best-effort summary; for line-level detail and any gaps, see the commit history (`git log`) or the GitHub PR list.
 
-## Unreleased
+## [3.1.2] - 2026-06-17 — Maia
+
+### Hardware reach
+- AMD ROCm via llama.cpp — including RDNA4 / RX 9070 (gfx1200/gfx1201) and community-verified cards (#26)
+- Apple Silicon — native macOS hybrid Metal path (native llama-server for inference + Docker for the rest of the stack) (#32)
+- Vulkan universal fallback — one image covering AMD / Intel / Snapdragon / Apple-via-MoltenVK / CPU (#114)
 
 ### Agent reliability — local-model tool loop
 - Tool results are rendered as user-role turns on the wire. Gemma's chat template has no `tool` role and silently dropped `role:"tool"` messages, so the model never saw any tool output (`list_directory` / `read_file` / `run_command`) and re-issued the same call until the repetition breaker fired. This was the root cause behind the "it can't see what it's reading / it just loops" reports. Model-agnostic (Qwen reads the `[tool result]` marker the same way).
@@ -27,6 +32,11 @@
 ### Structural call-graph reasoning (#39, thanks @yogthos)
 - Intra-file call-graph neighborhood (`calls:` / `called by:` per symbol) rides on `outline_file` and whole-file `read_file` of a `.py`, gated by `ATLAS_CALL_GRAPH`. Surfaces structure at the localization decision point without a repo-wide scan. (PR #125 by Dmitri Sotnikov, integrated and extended.)
 
+### Documentation
+- Translated ARCHITECTURE.md to zh-CN / ja / ko (#25); added a language switcher to the English ARCHITECTURE.md
+
+## [3.1.0] - 2026-05-12 — Maia
+
 ### Removed
 - Removed dead `ATLAS_USE_FOX` code paths in benchmark runner (#22)
 
@@ -46,7 +56,6 @@
 
 ### Documentation
 - Added multilingual documentation: Simplified Chinese (zh-CN), Japanese (ja), Korean (ko) for README, SETUP, and TROUBLESHOOTING
-- Translated ARCHITECTURE.md to zh-CN / ja / ko (#25); added a language switcher to the English ARCHITECTURE.md
 - Added language selector badges to README
 - Added star history chart to Latest News section
 - Rewrote README contributing section to encourage issue reports and community feedback
