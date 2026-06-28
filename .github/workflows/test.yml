@@ -75,6 +75,10 @@ jobs:
           # them). Pre-built wheels, no build toolchain needed.
           pip install tree_sitter tree_sitter_python tree_sitter_javascript
 
+      - name: install sandbox runtime dependencies
+        if: matrix.subset == 'tests/v3-service'
+        run: pip install -r sandbox/requirements-runtime.txt
+
       - name: pytest
         run: python scripts/production-readiness.py --only python-tests --pytest-path "${{ matrix.subset }}"
 

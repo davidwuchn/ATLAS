@@ -59,11 +59,11 @@ RUN bun --version
 # image lean means: smaller pull, smaller attack surface, no drift
 # between sandbox-baked-flask and user-pinned-flask, and the same
 # pattern works for Node/Rust/Go/Ruby/Java/PHP without favoring
-# Python.
+# Python. Keep the API runtime dependencies in one shared file so the
+# container and the unit-test environment cannot drift apart.
+COPY requirements-runtime.txt /tmp/sandbox-requirements-runtime.txt
 RUN pip install --no-cache-dir \
-    fastapi \
-    uvicorn \
-    pydantic \
+    -r /tmp/sandbox-requirements-runtime.txt \
     pytest \
     requests \
     ruff \
