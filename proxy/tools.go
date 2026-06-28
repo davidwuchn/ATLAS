@@ -86,6 +86,9 @@ func executeToolCall(name string, args json.RawMessage, ctx *AgentContext) *Tool
 			Error:   missingArgsHint(name),
 		}
 	}
+	if reason := validateToolWorkspacePaths(name, args, ctx); reason != "" {
+		return &ToolResult{Success: false, Error: reason}
+	}
 
 	result, err := tool.Execute(args, ctx)
 	if err != nil {
@@ -942,11 +945,12 @@ func writeFileWithV3(path, baselineContent string, ctx *AgentContext) (*ToolResu
 
 	// Enrich result with V3 metadata
 	out := WriteFileOutput{
-		BytesWritten:     len(code),
-		V3Used:           true,
-		CandidatesTested: v3Result.CandidatesTested,
-		WinningScore:     v3Result.WinningScore,
-		PhaseSolved:      v3Result.PhaseSolved,
+		BytesWritten:         len(code),
+		V3Used:               true,
+		CandidatesTested:     v3Result.CandidatesTested,
+		WinningScore:         v3Result.WinningScore,
+		PhaseSolved:          v3Result.PhaseSolved,
+		VerificationEvidence: v3Result.VerificationEvidence,
 	}
 	outBytes, _ := json.Marshal(out)
 	result.Data = outBytes
@@ -954,6 +958,7 @@ func writeFileWithV3(path, baselineContent string, ctx *AgentContext) (*ToolResu
 	result.CandidatesTested = v3Result.CandidatesTested
 	result.WinningScore = v3Result.WinningScore
 	result.PhaseSolved = v3Result.PhaseSolved
+	result.VerificationEvidence = v3Result.VerificationEvidence
 
 	return result, nil
 }
@@ -1252,6 +1257,7 @@ func editFileTool() *ToolDef {
 				result.CandidatesTested = v3Out.CandidatesTested
 				result.WinningScore = v3Out.WinningScore
 				result.PhaseSolved = v3Out.PhaseSolved
+				result.VerificationEvidence = v3Out.VerificationEvidence
 			}
 			return result, nil
 		},
@@ -1523,6 +1529,7 @@ func astEditTool() *ToolDef {
 				result.CandidatesTested = v3Out.CandidatesTested
 				result.WinningScore = v3Out.WinningScore
 				result.PhaseSolved = v3Out.PhaseSolved
+				result.VerificationEvidence = v3Out.VerificationEvidence
 			}
 			return result, nil
 		},
@@ -1533,10 +1540,11 @@ func astEditTool() *ToolDef {
 // edit_file result can carry the same v3_used / candidates_tested fields
 // write_file does. See PC-042.
 type V3EditMetadata struct {
-	Used             bool
-	CandidatesTested int
-	WinningScore     float64
-	PhaseSolved      string
+	Used                 bool
+	CandidatesTested     int
+	WinningScore         float64
+	PhaseSolved          string
+	VerificationEvidence []V3VerificationEvidence
 }
 
 // improveContentWithV3 sends content through the V3 pipeline and returns
@@ -1639,10 +1647,11 @@ func improveContentWithV3(path, content string, ctx *AgentContext) (string, V3Ed
 		chosen = content
 	}
 	return chosen, V3EditMetadata{
-		Used:             true,
-		CandidatesTested: v3Result.CandidatesTested,
-		WinningScore:     v3Result.WinningScore,
-		PhaseSolved:      v3Result.PhaseSolved,
+		Used:                 true,
+		CandidatesTested:     v3Result.CandidatesTested,
+		WinningScore:         v3Result.WinningScore,
+		PhaseSolved:          v3Result.PhaseSolved,
+		VerificationEvidence: v3Result.VerificationEvidence,
 	}, nil
 }
 
@@ -1797,8 +1806,8 @@ func normalizeQuotes(s string) string {
 	r := strings.NewReplacer(
 		"\u201c", "\"", // left double
 		"\u201d", "\"", // right double
-		"\u2018", "'",  // left single
-		"\u2019", "'",  // right single
+		"\u2018", "'", // left single
+		"\u2019", "'", // right single
 	)
 	return r.Replace(s)
 }
@@ -1807,7 +1816,7 @@ func normalizeQuotes(s string) string {
 func denormalizeQuotes(s string) string {
 	r := strings.NewReplacer(
 		"\"", "\u201c", // straight double → left double (approximate)
-		"'", "\u2019",  // straight single → right single (approximate)
+		"'", "\u2019", // straight single → right single (approximate)
 	)
 	return r.Replace(s)
 }
@@ -2156,8 +2165,11 @@ func runCommandTool() *ToolDef {
 			} else {
 				out, err = runViaSandbox(ctx, input.Command, cwd, timeoutSec)
 				if err != nil {
-					log.Printf("[run_command] sandbox unreachable, falling back to local exec: %v", err)
-					out = runLocally(input.Command, cwd, time.Duration(timeoutSec)*time.Second)
+					log.Printf("[run_command] sandbox unavailable: %v", err)
+					out = RunCommandOutput{
+						Stderr:   fmt.Sprintf("sandbox unavailable: %v", err),
+						ExitCode: 1,
+					}
 				}
 			}
 
@@ -2239,10 +2251,8 @@ func runViaSandbox(ctx *AgentContext, command, cwd string, timeoutSec int) (RunC
 	}, nil
 }
 
-// runLocally executes the command in the proxy container as a fallback
-// when the sandbox is unreachable (e.g. running tests outside docker
-// compose). Same code path as the original local exec — kept verbatim
-// so dev workflows that don't bring up the sandbox still work.
+// runLocally executes a command only when the operator explicitly selects
+// host verification. Sandbox outages never route here implicitly.
 func runLocally(command, cwd string, timeout time.Duration) RunCommandOutput {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -2454,9 +2464,10 @@ func cyclomaticComplexity(ctx *AgentContext, path, source string) (int, bool) {
 // the regex classifier is the floor, CC only escalates.
 //
 // Thresholds:
-//   CC ≥ 16 → Tier3Hard  — definitely needs full V3 + best-of-K
-//   CC ≥  8 → Tier2Medium — moderate branching, V3 likely helps
-//   CC <  8 → leave base tier unchanged
+//
+//	CC ≥ 16 → Tier3Hard  — definitely needs full V3 + best-of-K
+//	CC ≥  8 → Tier2Medium — moderate branching, V3 likely helps
+//	CC <  8 → leave base tier unchanged
 //
 // Calibrated against the snake/app.py family: a flask file with 8 routes
 // runs at CC≈9 (one branch per route) and the regex already classifies
@@ -2642,7 +2653,10 @@ func redundantReadShortCircuit(name string, args json.RawMessage, ctx *AgentCont
 	if input.Offset != nil || input.Limit != nil || strings.TrimSpace(input.Path) == "" {
 		return nil
 	}
-	path := resolveAgentPath(ctx, input.Path)
+	path, err := resolveWorkspacePath(ctx, input.Path)
+	if err != nil {
+		return &ToolResult{Success: false, Error: "read_file: " + err.Error()}
+	}
 	prev, ok := ctx.FilesRead[path]
 	if !ok {
 		// Diagnostic: a re-read that SHOULD have been cached but wasn't.
@@ -2673,7 +2687,7 @@ func redundantReadShortCircuit(name string, args json.RawMessage, ctx *AgentCont
 		return nil
 	}
 	out := ReadFileOutput{
-		Content: fmt.Sprintf("(You already read %s earlier in this session and it has not changed — its full content is above in the conversation. Do not read it again. Make your edit now with ast_edit or edit_file.)", input.Path),
+		Content:    fmt.Sprintf("(You already read %s earlier in this session and it has not changed — its full content is above in the conversation. Do not read it again. Make your edit now with ast_edit or edit_file.)", input.Path),
 		TotalLines: strings.Count(prev, "\n") + 1,
 		StartLine:  1,
 		EndLine:    strings.Count(prev, "\n") + 1,
@@ -2861,7 +2875,7 @@ func firstNonEmptyLine(s string) string {
 
 func runBackgroundTool() *ToolDef {
 	return &ToolDef{
-		Name: "run_background",
+		Name:        "run_background",
 		Description: "Start a long-running command (server, watcher, etc.) in the background and return a job_id. Use for `python app.py`, `npm start`, `cargo run`, `flask run` — anything that doesn't exit. Returns initial stdout/stderr captured during a brief settle window so you can confirm startup. Pair with run_command/curl to probe the running service, then stop_background to clean up.",
 		InputSchema: RunBackgroundInput{},
 		ReadOnly:    false,
@@ -2922,7 +2936,7 @@ func runBackgroundTool() *ToolDef {
 
 func tailBackgroundTool() *ToolDef {
 	return &ToolDef{
-		Name: "tail_background",
+		Name:        "tail_background",
 		Description: "Read the recent stdout/stderr of a background job started via run_background. Returns the last N lines of each stream (default 50), the run state (running/exited), and the exit code if applicable. Use to check whether a server is still up, watch test runner output, or read the failure traceback after a crash.",
 		InputSchema: TailBackgroundInput{},
 		ReadOnly:    true,
@@ -2956,7 +2970,7 @@ func tailBackgroundTool() *ToolDef {
 
 func stopBackgroundTool() *ToolDef {
 	return &ToolDef{
-		Name: "stop_background",
+		Name:        "stop_background",
 		Description: "Stop a background job started via run_background. Sends SIGTERM, waits briefly, then SIGKILL if needed. Returns the final stdout/stderr buffer. Always call this when you're done with a background job — leaving them running blocks future job slots.",
 		InputSchema: StopBackgroundInput{},
 		ReadOnly:    false,
@@ -2996,7 +3010,9 @@ func sandboxStartBackground(ctx *AgentContext, command, cwd string) (string, int
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		var d struct{ Detail string `json:"detail"` }
+		var d struct {
+			Detail string `json:"detail"`
+		}
 		_ = json.NewDecoder(resp.Body).Decode(&d)
 		if d.Detail != "" {
 			return "", 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, d.Detail)

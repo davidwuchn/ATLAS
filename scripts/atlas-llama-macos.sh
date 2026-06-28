@@ -72,6 +72,7 @@ KV_CACHE_K="${KV_CACHE_TYPE_K:-q8_0}"
 KV_CACHE_V="${KV_CACHE_TYPE_V:-q4_0}"
 PARALLEL="${PARALLEL_SLOTS:-1}"
 PORT="${OVERRIDE_PORT:-${ATLAS_LLAMA_PORT:-8080}}"
+HOST="${ATLAS_LLAMA_HOST:-127.0.0.1}"
 
 # Resolve model path. ATLAS_MODELS_DIR is "./models" (relative to atlas root)
 # or an absolute path. ATLAS_MODEL_FILE is the .gguf filename.
@@ -106,6 +107,7 @@ ATLAS llama-server (native macOS Metal) — #32 hybrid path
   Parallel slots:       $PARALLEL
   KV cache K / V:       $KV_CACHE_K / $KV_CACHE_V
   Port:                 $PORT
+  Host:                 $HOST
   ASA steering:         ${CVECTOR_FLAGS:-disabled}
   Binary:               $LLAMA_SERVER
 
@@ -113,8 +115,10 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Launch. Same flags as the docker entrypoint with two differences:
-#   --host 0.0.0.0   bind on all interfaces so Docker Desktop's
-#                    host.docker.internal proxy can reach us
+#   --host 127.0.0.1 bind only on loopback by default. Docker Desktop's
+#                    host.docker.internal gateway can still reach host
+#                    loopback services. Set ATLAS_LLAMA_HOST explicitly
+#                    only when a different interface is required.
 #   no --mlock       optional on Mac (unified memory makes it less
 #                    impactful; can be added back if perf testing
 #                    shows it helps)
@@ -131,7 +135,7 @@ exec "$LLAMA_SERVER" \
   --parallel "$PARALLEL" \
   --cont-batching \
   -ngl 99 \
-  --host 0.0.0.0 \
+  --host "$HOST" \
   --port "$PORT" \
   --flash-attn on \
   -b 4096 \

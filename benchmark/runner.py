@@ -46,10 +46,10 @@ class LLMConnectionError(Exception):
 
 def extract_code(response: str) -> str:
     """
-    Extract Python code from LLM response.
+    Extract code from an LLM response.
 
     Handles various formats:
-    - Markdown code blocks (```python ... ```)
+    - Markdown code blocks with any language label (```python, ```javascript, ...)
     - Plain code blocks (``` ... ```)
     - Raw code without blocks
     - Qwen3.5 <think>...</think> blocks (stripped before extraction)
@@ -77,20 +77,15 @@ def extract_code(response: str) -> str:
         # Return the last match (the model's answer, not the few-shot examples)
         return begin_matches[-1].strip()
 
-    # Try to extract from markdown code blocks
-    # Pattern for ```python ... ``` or ```py ... ```
-    pattern = r'```(?:python|py)?\s*\n(.*?)```'
-    matches = re.findall(pattern, response, re.DOTALL | re.IGNORECASE)
-
-    if matches:
-        # Return the longest match (likely the main code block)
-        return max(matches, key=len).strip()
-
-    # Try generic code blocks
-    pattern = r'```\s*\n(.*?)```'
+    # Extract fenced code with an optional language label. The V3 service
+    # supports multiple languages, so limiting labels to Python leaves fences
+    # such as ```javascript in the returned source and causes false syntax
+    # failures downstream.
+    pattern = r'```[^\S\r\n]*[A-Za-z0-9_+.#-]*[^\S\r\n]*\r?\n(.*?)```'
     matches = re.findall(pattern, response, re.DOTALL)
 
     if matches:
+        # Return the longest match (likely the main code block)
         return max(matches, key=len).strip()
 
     # No code blocks found, assume raw code

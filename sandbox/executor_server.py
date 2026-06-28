@@ -22,6 +22,7 @@ Security / trust model (load-bearing — read before "fixing" CodeQL alerts):
     the sandbox's purpose; dismiss the alerts with rationale instead.
 """
 
+import json
 import os
 import shutil
 import signal
@@ -55,6 +56,10 @@ SUPPORTED_LANGUAGES = {
     "rust", "rs",
     "c", "cpp", "c++",
     "bash", "sh", "shell",
+    "html", "htm",
+    "xml",
+    "json",
+    "yaml", "yml",
 }
 
 def normalize_language(lang: str) -> str:
@@ -75,6 +80,14 @@ def normalize_language(lang: str) -> str:
         return "cpp"
     if lang in ("bash", "sh", "shell"):
         return "bash"
+    if lang in ("html", "htm"):
+        return "html"
+    if lang in ("xml",):
+        return "xml"
+    if lang in ("json",):
+        return "json"
+    if lang in ("yaml", "yml"):
+        return "yaml"
     return lang
 
 
@@ -160,6 +173,12 @@ class ShellRequest(BaseModel):
     cwd: Optional[str] = None  # absolute path inside container, defaults to /workspace
     timeout: int = 30          # seconds; capped at MAX_EXECUTION_TIME
     env: Optional[Dict[str, str]] = None
+    # Optional ephemeral overlay used by V3 build verification. When
+    # present, /shell copies a bounded workspace snapshot into /tmp,
+    # overlays these relative file paths, runs the command there, then
+    # deletes the snapshot. This lets V3 test a candidate without
+    # writing it into the real bind-mounted project.
+    files: Optional[Dict[str, str]] = None
 
 
 class ShellResponse(BaseModel):
@@ -171,6 +190,201 @@ class ShellResponse(BaseModel):
 
 
 WORKSPACE_ROOT = Path("/workspace")
+SHELL_SNAPSHOT_IGNORE = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".cache",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "build",
+    "coverage",
+    ".coverage",
+    "htmlcov",
+    ".next",
+    "dist",
+    "target",
+    "secrets",
+}
+SHELL_SNAPSHOT_IGNORE_SUFFIXES = (
+    ".arrow",
+    ".bin",
+    ".db",
+    ".gguf",
+    ".gz",
+    ".onnx",
+    ".parquet",
+    ".pt",
+    ".safetensors",
+    ".sqlite",
+    ".tar",
+    ".zip",
+)
+SHELL_SNAPSHOT_MAX_FILES = int(os.getenv("ATLAS_SHELL_SNAPSHOT_MAX_FILES", "20000"))
+SHELL_SNAPSHOT_MAX_BYTES = int(os.getenv("ATLAS_SHELL_SNAPSHOT_MAX_BYTES", str(256 * 1024 * 1024)))
+SHELL_SNAPSHOT_MAX_FILE_BYTES = int(os.getenv("ATLAS_SHELL_SNAPSHOT_MAX_FILE_BYTES", str(16 * 1024 * 1024)))
+
+
+def _skip_shell_snapshot_path(path: Path) -> bool:
+    name = path.name
+    if name in SHELL_SNAPSHOT_IGNORE or name.startswith(".env"):
+        return True
+    return name.endswith(SHELL_SNAPSHOT_IGNORE_SUFFIXES)
+
+
+def _copy_symlink_if_safe(src: Path, dest: Path, source_root: Path, snapshot: Path) -> bool:
+    try:
+        target = src.resolve(strict=True)
+        rel_target = target.relative_to(source_root)
+        link_target = os.readlink(src)
+    except (OSError, ValueError):
+        return False
+
+    if os.path.isabs(link_target):
+        snapshot_target = snapshot / rel_target
+        link_target = os.path.relpath(snapshot_target, dest.parent)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(link_target, dest)
+    return True
+
+
+def _copy_workspace_snapshot(source: Path, snapshot: Path):
+    files_copied = 0
+    bytes_copied = 0
+    source = source.resolve()
+
+    for root, dirs, filenames in os.walk(source, topdown=True, followlinks=False):
+        root_path = Path(root)
+        try:
+            rel_root = root_path.relative_to(source)
+        except ValueError:
+            continue
+        target_dir = snapshot / rel_root
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        kept_dirs = []
+        for name in dirs:
+            src_dir = root_path / name
+            if _skip_shell_snapshot_path(src_dir):
+                continue
+            if src_dir.is_symlink():
+                _copy_symlink_if_safe(src_dir, target_dir / name, source, snapshot)
+                continue
+            kept_dirs.append(name)
+        dirs[:] = kept_dirs
+
+        for name in filenames:
+            src = root_path / name
+            if _skip_shell_snapshot_path(src):
+                continue
+            if src.is_symlink():
+                _copy_symlink_if_safe(src, target_dir / name, source, snapshot)
+                continue
+            try:
+                stat = src.stat()
+            except OSError:
+                continue
+            if not src.is_file():
+                continue
+            if stat.st_size > SHELL_SNAPSHOT_MAX_FILE_BYTES:
+                logger.info(
+                    "shell overlay snapshot skipped large file: %s (%d bytes)",
+                    src, stat.st_size,
+                )
+                continue
+
+            files_copied += 1
+            bytes_copied += stat.st_size
+            if files_copied > SHELL_SNAPSHOT_MAX_FILES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"workspace snapshot file limit exceeded ({SHELL_SNAPSHOT_MAX_FILES})",
+                )
+            if bytes_copied > SHELL_SNAPSHOT_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"workspace snapshot byte limit exceeded ({SHELL_SNAPSHOT_MAX_BYTES})",
+                )
+            shutil.copy2(src, target_dir / name)
+
+
+def _safe_overlay_path(name: str) -> Path:
+    if not isinstance(name, str) or not name:
+        raise HTTPException(status_code=400, detail="overlay file path is required")
+    rel = Path(name)
+    if rel.is_absolute() or name.startswith("\\") or ".." in rel.parts:
+        raise HTTPException(status_code=400, detail=f"unsafe overlay file path: {name!r}")
+    return rel
+
+
+def _write_overlay_files(root: Path, files: Dict[str, str]):
+    root_resolved = root.resolve()
+    for name, content in files.items():
+        rel = _safe_overlay_path(name)
+        target = root / rel
+        content = content if isinstance(content, str) else ""
+        if len(content.encode("utf-8", "ignore")) > SHELL_SNAPSHOT_MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail=f"overlay file is too large: {name!r}")
+        try:
+            target_resolved = target.resolve(strict=False)
+            target_resolved.relative_to(root_resolved)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=400, detail=f"overlay file escapes workspace: {name!r}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+
+
+def _snapshot_workspace_with_overlay(files: Dict[str, str]) -> Path:
+    snapshot = Path(tempfile.mkdtemp(prefix="shell-", dir=WORKSPACE_BASE))
+    try:
+        if WORKSPACE_ROOT.exists():
+            _copy_workspace_snapshot(WORKSPACE_ROOT, snapshot)
+        _write_overlay_files(snapshot, files)
+        return snapshot
+    except Exception:
+        shutil.rmtree(snapshot, ignore_errors=True)
+        raise
+
+
+def _resolve_shell_cwd(raw_cwd: Optional[str], root: Path) -> Path:
+    if not raw_cwd:
+        return root
+    try:
+        requested = Path(raw_cwd)
+        if requested.is_absolute():
+            rel = requested.resolve(strict=False).relative_to(WORKSPACE_ROOT.resolve(strict=False))
+        else:
+            rel = requested
+        if rel.is_absolute() or ".." in rel.parts:
+            raise ValueError(f"cwd must be under {WORKSPACE_ROOT}")
+        cwd = (root / rel).resolve(strict=False)
+        cwd.relative_to(root.resolve(strict=False))
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid cwd: {e}")
+    if not cwd.exists():
+        raise HTTPException(status_code=400, detail=f"cwd does not exist: {cwd}")
+    return cwd
+
+
+def _translate_workspace_command(command: str, root: Path) -> str:
+    """Point absolute workspace paths at the ephemeral overlay root.
+
+    V3 build commands often come from project detection and may include
+    absolute `/workspace/...` paths. When /shell is running with an overlay
+    snapshot, those paths must resolve inside the snapshot, not the real
+    bind-mounted checkout.
+    """
+    workspace = str(WORKSPACE_ROOT.resolve(strict=False))
+    replacement = str(root.resolve(strict=False))
+    if workspace == replacement:
+        return command
+    pattern = rf"(?<![\w./-]){re.escape(workspace)}(?=$|/|[^\w./-])"
+    return re.sub(pattern, replacement, command)
 
 
 # ---------------------------------------------------------------------------
@@ -400,38 +614,33 @@ def run_shell(request: ShellRequest):
 
     timeout = min(max(1, request.timeout), MAX_EXECUTION_TIME)
 
-    # Resolve cwd. Default to /workspace; if the caller provides one,
-    # require it to live under /workspace so a model can't `cd /etc`
-    # to read host secrets — the workspace mount is the agreed
-    # boundary. The path must already exist (no auto-mkdir — that
-    # would let the model litter the host fs with empty dirs).
-    if request.cwd:
-        try:
-            cwd = Path(request.cwd).resolve()
-        except (OSError, ValueError) as e:
-            raise HTTPException(status_code=400, detail=f"invalid cwd: {e}")
-        if not (cwd == WORKSPACE_ROOT or WORKSPACE_ROOT in cwd.parents):
-            raise HTTPException(
-                status_code=400,
-                detail=f"cwd must be under {WORKSPACE_ROOT}, got {cwd}",
-            )
-        if not cwd.exists():
-            raise HTTPException(status_code=400, detail=f"cwd does not exist: {cwd}")
-    else:
-        cwd = WORKSPACE_ROOT
+    snapshot = None
+    root = WORKSPACE_ROOT
+    try:
+        if request.files:
+            snapshot = _snapshot_workspace_with_overlay(request.files)
+            root = snapshot
+        # Resolve cwd. Default to /workspace (or the temp overlay root);
+        # if the caller provides one, require it to live under the
+        # workspace boundary. The path must already exist (no auto-mkdir).
+        cwd = _resolve_shell_cwd(request.cwd, root)
+        command = _translate_workspace_command(request.command, root)
 
-    start = time.time()
-    result = _run_cmd(["bash", "-c", request.command],
-                      timeout=timeout, cwd=cwd, env=request.env)
-    elapsed_ms = int((time.time() - start) * 1000)
+        start = time.time()
+        result = _run_cmd(["bash", "-c", command],
+                          timeout=timeout, cwd=cwd, env=request.env)
+        elapsed_ms = int((time.time() - start) * 1000)
 
-    return ShellResponse(
-        success=result["success"],
-        stdout=result["stdout"],
-        stderr=result["stderr"],
-        exit_code=result["returncode"],
-        elapsed_ms=elapsed_ms,
-    )
+        return ShellResponse(
+            success=result["success"],
+            stdout=result["stdout"],
+            stderr=result["stderr"],
+            exit_code=result["returncode"],
+            elapsed_ms=elapsed_ms,
+        )
+    finally:
+        if snapshot is not None:
+            shutil.rmtree(snapshot, ignore_errors=True)
 
 
 @app.post("/execute", response_model=ExecuteResponse)
@@ -551,7 +760,7 @@ def _syntax_check_impl(lang: str, code: str, workspace: Path, filename: Optional
             stderr = result.get("stderr", "")
             for line in stderr.splitlines():
                 line = line.strip()
-                if line and "SyntaxError" in line or "IndentationError" in line or "TabError" in line:
+                if line and any(kind in line for kind in ("SyntaxError", "IndentationError", "TabError")):
                     errors.append(line)
             if not errors and stderr.strip():
                 errors.append(stderr.strip().split("\n")[-1])
@@ -627,6 +836,38 @@ def _syntax_check_impl(lang: str, code: str, workspace: Path, filename: Optional
         result = _run_cmd(["bash", "-n", str(fpath)], timeout=5, cwd=workspace)
         if result["returncode"] != 0:
             errors.append(result.get("stderr", "").strip())
+
+    elif lang == "json":
+        try:
+            json.loads(code)
+        except json.JSONDecodeError as e:
+            errors.append(str(e))
+
+    elif lang in ("yaml", "yml"):
+        try:
+            import yaml
+            yaml.safe_load(code)
+        except Exception as e:
+            errors.append(str(e))
+
+    elif lang in ("html", "htm"):
+        from html.parser import HTMLParser
+        try:
+            parser = HTMLParser()
+            parser.feed(code)
+            parser.close()
+        except Exception as e:
+            errors.append(str(e))
+
+    elif lang == "xml":
+        import xml.etree.ElementTree as ET
+        try:
+            ET.fromstring(code)
+        except ET.ParseError as e:
+            errors.append(str(e))
+
+    else:
+        errors.append(f"syntax verification is unavailable for language: {lang}")
 
     return errors
 

@@ -498,6 +498,68 @@ class SandboxAdapter:
         except Exception as e:
             return False, "", str(e)
 
+    def syntax_check(self, code: str, language: str, filename: str = "") -> Tuple[bool, str, str]:
+        """Ask the sandbox to parse or compile source without executing it."""
+        body = {
+            "code": code,
+            "language": language,
+            "filename": filename or None,
+        }
+        try:
+            req = urllib.request.Request(
+                f"{SANDBOX_URL}/syntax-check",
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read())
+            errors = data.get("errors", [])
+            error_text = "\n".join(str(error) for error in errors)
+            return bool(data.get("valid", False)), "", error_text
+        except Exception as e:
+            return False, "", f"syntax verification unavailable: {e}"
+
+    def run_command(
+        self,
+        command: str,
+        files: Optional[Dict[str, str]] = None,
+        cwd: str = "/workspace",
+        timeout: int = 60,
+    ) -> Tuple[bool, str, str, Dict[str, Any]]:
+        """Run a project command through the sandbox /shell endpoint.
+
+        `files` is an ephemeral overlay: the sandbox snapshots /workspace,
+        applies these relative paths in the temp copy, runs the command there,
+        then deletes the temp copy. It lets V3 verify a candidate without
+        writing it to the user's real workspace.
+        """
+        body = {
+            "command": command,
+            "cwd": cwd or "/workspace",
+            "timeout": timeout,
+        }
+        if files:
+            body["files"] = files
+        try:
+            req = urllib.request.Request(
+                f"{SANDBOX_URL}/shell",
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout + 10) as resp:
+                data = json.loads(resp.read())
+            return (
+                bool(data.get("success", False)),
+                data.get("stdout", ""),
+                data.get("stderr", ""),
+                data,
+            )
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")
+            return False, "", detail, {"exit_code": None, "elapsed_ms": 0}
+        except Exception as e:
+            return False, "", f"build verification unavailable: {e}", {"exit_code": None, "elapsed_ms": 0}
+
 
 # --- Embedding Adapter --------------------------------------------------------
 
@@ -636,14 +698,22 @@ def smoke_compile_check(code: str, sandbox, language: str = "python") -> Tuple[b
     pairs are nonsensical (curses games, pygame apps, flask servers, …).
     Runs inside the sandbox so any import-time crashes show up as stderr.
 
-    PC-048: language-aware. Python files run the AST parse / compile
-    smoke. HTML/JSON/YAML files run a stdlib parse for well-formedness.
-    Everything else (CSS, JS, MD, plain text, …) returns OK without a
-    sandbox round-trip — we don't have a cheap, accurate validator and
-    the LLM is more reliable on those formats than spurious-failure
-    pressure from a half-built validator would be.
+    PC-048: language-aware. Python, JavaScript, TypeScript, Go, Rust,
+    C/C++, Bash, HTML, XML, JSON, and YAML files use the sandbox syntax
+    checker. Unknown formats fail explicitly instead of being accepted
+    without evidence.
     """
     lang = (language or "python").lower()
+
+    verified_languages = {
+        "python", "py", "javascript", "typescript", "go", "rust",
+        "c", "cpp", "bash", "html", "htm", "xml", "json", "yaml", "yml",
+    }
+    if hasattr(sandbox, "syntax_check") and lang in verified_languages:
+        normalized = {
+            "py": "python", "htm": "html", "yml": "yaml",
+        }.get(lang, lang)
+        return sandbox.syntax_check(code, normalized)
 
     if lang in ("html", "htm"):
         smoke = (
@@ -699,10 +769,7 @@ def smoke_compile_check(code: str, sandbox, language: str = "python") -> Tuple[b
         return (ok and "SMOKE_OK" in out), out, err
 
     if lang not in ("python", "py"):
-        # CSS, JS, TS, MD, plain text, anything else — no cheap validator,
-        # trust the LLM. Returning OK avoids false-positive failures that
-        # cascade into PR-CoT repair attempts and LLM timeouts.
-        return True, "SMOKE_SKIP (non-Python)", ""
+        return False, "", f"syntax verification unavailable for language: {lang}"
 
     # Default: Python compile smoke
     smoke = (
@@ -718,6 +785,145 @@ def smoke_compile_check(code: str, sandbox, language: str = "python") -> Tuple[b
     )
     ok, out, err = sandbox(smoke)
     return (ok and "SMOKE_OK" in out), out, err
+
+
+BUILD_EVIDENCE_LIMIT = 4000
+ALLOWED_BUILD_PREFIXES = (
+    "npm run build",
+    "npm run test",
+    "npm test",
+    "pnpm run build",
+    "pnpm run test",
+    "pnpm test",
+    "yarn build",
+    "yarn test",
+    "yarn run build",
+    "yarn run test",
+    "bun run build",
+    "bun run test",
+    "bun test",
+    "npx tsc --noEmit",
+    "npx next build",
+    "python -m py_compile",
+    "python -m pytest",
+    "pytest",
+    "go build",
+    "go test",
+    "cargo build",
+    "cargo check",
+    "make",
+    "cmake --build",
+    "bash -n",
+)
+DISALLOWED_BUILD_TOKENS = (
+    ";", "&&", "||", "|", "&", "<", ">", "`", "$(", "\n", "\r", "\x00",
+)
+
+
+def _bounded_evidence(text: str, limit: int = BUILD_EVIDENCE_LIMIT) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n... (truncated)"
+
+
+def _build_command_allowed(command: str) -> bool:
+    command = (command or "").strip()
+    if not command or any(token in command for token in DISALLOWED_BUILD_TOKENS):
+        return False
+    for prefix in ALLOWED_BUILD_PREFIXES:
+        if command == prefix or command.startswith(prefix + " "):
+            return True
+    return False
+
+
+def _project_relative_path(file_path: str, working_dir: str = "/workspace") -> str:
+    if not file_path:
+        raise ValueError("file_path is required for build verification")
+    path = Path(file_path)
+    if path.is_absolute():
+        root = Path(working_dir or "/workspace").resolve(strict=False)
+        try:
+            rel = path.resolve(strict=False).relative_to(root)
+        except ValueError as e:
+            raise ValueError(f"file_path must be under working_dir: {file_path}") from e
+    else:
+        rel = path
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ValueError(f"unsafe file_path for build verification: {file_path}")
+    return str(rel)
+
+
+def verify_build_command(
+    code: str,
+    sandbox,
+    build_command: str,
+    file_path: str,
+    project_files: Dict[str, str],
+    working_dir: str,
+    emit=None,
+) -> Tuple[bool, str, str, Dict[str, Any]]:
+    command = (build_command or "").strip()
+    evidence: Dict[str, Any] = {
+        "verifier": "build_command",
+        "command": command,
+        "status": "unavailable",
+        "exit_code": None,
+        "duration_ms": 0,
+        "stdout": "",
+        "stderr": "",
+    }
+    if not command:
+        return True, "", "", {}
+    if not hasattr(sandbox, "run_command"):
+        evidence["stderr"] = "sandbox build command runner is unavailable"
+        if emit:
+            emit("build_verify_unavailable", evidence["stderr"], command=command)
+        return False, "", evidence["stderr"], evidence
+    if not _build_command_allowed(command):
+        evidence["stderr"] = f"build command is not allowed by verification policy: {command}"
+        if emit:
+            emit("build_verify_unavailable", evidence["stderr"], command=command)
+        return False, "", evidence["stderr"], evidence
+
+    try:
+        rel_path = _project_relative_path(file_path, working_dir)
+    except ValueError as e:
+        evidence["stderr"] = str(e)
+        if emit:
+            emit("build_verify_unavailable", evidence["stderr"], command=command)
+        return False, "", evidence["stderr"], evidence
+
+    # Build verification snapshots the real /workspace inside the sandbox.
+    # Do not overlay `project_files` here: that map is prompt context from
+    # the proxy and may be intentionally truncated for token budget. Only
+    # overlay the candidate under test so full project files remain intact.
+    overlay = {rel_path: code}
+    ok, out, err, meta = sandbox.run_command(
+        command,
+        files=overlay,
+        cwd=working_dir or "/workspace",
+        timeout=60,
+    )
+    evidence.update({
+        "status": "passed" if ok else "failed",
+        "exit_code": meta.get("exit_code"),
+        "duration_ms": int(meta.get("elapsed_ms") or 0),
+        "stdout": _bounded_evidence(out),
+        "stderr": _bounded_evidence(err),
+    })
+    if emit:
+        emit(
+            "build_verify",
+            f"{command}: {'OK' if ok else 'FAIL'}",
+            command=command,
+            status=evidence["status"],
+            exit_code=evidence["exit_code"],
+            duration_ms=evidence["duration_ms"],
+        )
+    if not ok:
+        return False, out, err or out or f"build command failed: {command}", evidence
+    return True, out, err, evidence
 
 
 def interactive_lint(code: str) -> Tuple[bool, str]:
@@ -874,7 +1080,8 @@ class V3PipelineService:
 
     def run(self, problem: str, task_id: str = "cli",
             progress_callback=None, files: Dict[str, str] = None,
-            file_path: str = "") -> Dict[str, Any]:
+            file_path: str = "", build_command: str = "",
+            working_dir: str = "/workspace") -> Dict[str, Any]:
         """Run the full V3 pipeline on a coding problem.
 
         Args:
@@ -885,15 +1092,17 @@ class V3PipelineService:
             file_path: Target file path (used by PC-048 to detect language
                 for the smoke check — `.html` files use HTML parser, not
                 Python compile, etc.)
+            build_command: Optional project build command to run against an
+                ephemeral candidate overlay after syntax/self-tests pass.
+            working_dir: Container workspace root used by the sandbox overlay.
         """
         start = time.time()
         events = []
         files = files or {}
 
         # PC-048: derive language from the target file's extension. Used
-        # only by smoke_compile_check below to pick the right parser
-        # (Python compile vs HTML parser vs JSON loads vs skip-and-pass
-        # for unknown formats). Defaults to Python when no file_path is
+        # only by smoke_compile_check below to pick the right syntax
+        # checker. Defaults to Python when no file_path is
         # supplied, preserving previous behavior for /v3/run callers.
         _ext = Path(file_path).suffix.lower() if file_path else ""
         _ext_to_lang = {
@@ -907,7 +1116,7 @@ class V3PipelineService:
             ".md": "markdown", ".markdown": "markdown",
             ".txt": "text", ".rst": "text",
             ".toml": "toml",
-            ".xml": "html",  # treat XML same as HTML for parsing
+            ".xml": "xml",
             ".sh": "bash", ".bash": "bash",
             ".go": "go",
             ".rs": "rust",
@@ -956,6 +1165,7 @@ class V3PipelineService:
             "total_tokens": 0,
             "total_time_ms": 0.0,
             "events": [],
+            "verification_evidence": [],
         }
 
         # ===== PHASE 0: PROBE =====
@@ -1037,6 +1247,33 @@ class V3PipelineService:
 
         def verified_sandbox(code, extra_test=""):
             """Sandbox + verification. Algorithmic tasks: I/O self-tests; interactive: compile smoke."""
+            verification_evidence: List[Dict[str, Any]] = []
+
+            def verify_build_if_requested(out="", err=""):
+                ok, build_out, build_err, evidence = verify_build_command(
+                    code=code,
+                    sandbox=sandbox,
+                    build_command=build_command,
+                    file_path=file_path,
+                    project_files=files,
+                    working_dir=working_dir or "/workspace",
+                    emit=emit,
+                )
+                if evidence:
+                    verification_evidence.append(evidence)
+                if not ok:
+                    return False, build_out, build_err, verification_evidence
+                return True, out, err, verification_evidence
+
+            # Non-Python candidates always use the language-aware syntax path.
+            # Python self-tests cannot establish correctness for another language.
+            if smoke_language not in ("python", "py"):
+                ok, out, err = smoke_compile_check(code, sandbox, language=smoke_language)
+                emit("smoke_check", f"compile={'OK' if ok else 'FAIL'} ({smoke_language})")
+                if not ok:
+                    return ok, out, err, verification_evidence
+                return verify_build_if_requested(out, err)
+
             # Interactive tasks: skip the run-and-test; just verify the code
             # parses and compiles. Running curses/pygame/flask in the sandbox
             # would fail for environmental reasons (no TTY, no display) even
@@ -1048,24 +1285,24 @@ class V3PipelineService:
                 ok, out, err = smoke_compile_check(code, sandbox, language=smoke_language)
                 emit("smoke_check", f"compile={'OK' if ok else 'FAIL'} ({smoke_language})")
                 if not ok:
-                    return ok, out, err
+                    return ok, out, err, verification_evidence
                 # Interactive lint is Python-AST based — only meaningful for
                 # Python files. Skip for HTML/CSS/JSON/etc.
                 if smoke_language not in ("python", "py"):
-                    return True, out, err
+                    return True, out, err, verification_evidence
                 # Interactive lint: catch raw stdin reads / blocking input loops
                 # that compile fine but don't actually work for keystroke
                 # handling (PC-034).
                 lint_ok, lint_reason = interactive_lint(code)
                 if lint_ok:
                     emit("interactive_lint", "OK")
-                    return True, out, err
+                    return verify_build_if_requested(out, err)
                 emit("interactive_lint", f"FAIL: {lint_reason}")
-                return False, out, f"interactive_lint: {lint_reason}"
+                return False, out, f"interactive_lint: {lint_reason}", verification_evidence
 
             ok, out, err = sandbox(code)
             if not ok:
-                return False, out, err
+                return False, out, err, verification_evidence
             if self_tests and self_tests.test_cases:
                 p, fails = 0, []
                 for i, tc in enumerate(self_tests.test_cases):
@@ -1081,8 +1318,8 @@ class V3PipelineService:
                 total = len(self_tests.test_cases)
                 emit("self_test_verify", f"{p}/{total} passed")
                 if total > 0 and p < total / 2:
-                    return False, out, f"Self-test:{p}/{total}. "+";".join(fails[:3])
-            return True, out, err
+                    return False, out, f"Self-test:{p}/{total}. "+";".join(fails[:3]), verification_evidence
+            return verify_build_if_requested(out, err)
 
         # Score and test probe with self-generated tests
         probe_energy_raw, probe_energy_norm = 0.0, 0.5
@@ -1090,7 +1327,7 @@ class V3PipelineService:
         if probe_code:
             probe_energy_raw, probe_energy_norm = score_candidate(probe_code)
             emit("probe_scored", f"C(x)={probe_energy_raw:.2f} norm={probe_energy_norm:.2f}")
-            probe_passed, probe_stdout, probe_stderr = verified_sandbox(probe_code)
+            probe_passed, probe_stdout, probe_stderr, probe_evidence = verified_sandbox(probe_code)
             emit("probe_sandbox", f"passed={probe_passed} stderr={probe_stderr[:80] if probe_stderr else ''}")
             result["total_tokens"] += tokens
 
@@ -1101,6 +1338,7 @@ class V3PipelineService:
             result["phase_solved"] = "probe"
             result["candidates_generated"] = 1
             result["total_time_ms"] = (time.time() - start) * 1000
+            result["verification_evidence"] = probe_evidence
             result["events"] = events
             return result
 
@@ -1218,11 +1456,12 @@ class V3PipelineService:
                 passing.append(c)
                 continue
             sb_start = time.time()
-            passed, stdout, stderr = verified_sandbox(c["code"])
+            passed, stdout, stderr, verification_evidence = verified_sandbox(c["code"])
             sb_ms = int((time.time() - sb_start) * 1000)
             c["passed"] = passed
             c["stdout"] = stdout
             c["stderr"] = stderr
+            c["verification_evidence"] = verification_evidence
             if passed:
                 passing.append(c)
                 emit("sandbox_pass", f"Candidate {c['index']} passed",
@@ -1380,6 +1619,7 @@ class V3PipelineService:
                         result["code"] = winner["code"]
                         result["phase_solved"] = "phase1_sstar"
                         result["total_time_ms"] = (time.time() - start) * 1000
+                        result["verification_evidence"] = winner.get("verification_evidence", [])
                         result["events"] = events
                         return result
                 except Exception as e:
@@ -1398,6 +1638,8 @@ class V3PipelineService:
                 result["code"] = selected.code
                 result["phase_solved"] = "phase1"
                 result["total_time_ms"] = (time.time() - start) * 1000
+                winner = next((c for c in passing if c.get("index") == selected.index), None)
+                result["verification_evidence"] = (winner or {}).get("verification_evidence", [])
                 result["events"] = events
                 return result
 
@@ -1481,7 +1723,7 @@ class V3PipelineService:
                 )
                 result["total_tokens"] += pr_result.total_tokens
                 for repair_code in pr_result.repairs:
-                    passed, stdout, stderr = verified_sandbox(repair_code)
+                    passed, stdout, stderr, repair_evidence = verified_sandbox(repair_code)
                     if passed:
                         emit("pr_cot_pass", "PR-CoT repair succeeded!",
                              strategy="pr_cot", tokens=pr_result.total_tokens)
@@ -1489,6 +1731,7 @@ class V3PipelineService:
                         result["code"] = repair_code
                         result["phase_solved"] = "pr_cot"
                         result["total_time_ms"] = (time.time() - start) * 1000
+                        result["verification_evidence"] = repair_evidence
                         result["events"] = events
                         return result
                 emit("pr_cot_failed", "PR-CoT repair did not produce passing code")
@@ -1527,17 +1770,21 @@ class V3PipelineService:
                 )
                 result["total_tokens"] += ref_result.total_tokens
                 if ref_result.solved:
-                    emit("refinement_pass",
-                         f"Refinement solved in {ref_result.total_iterations} iterations!",
-                         strategy="refinement",
-                         iterations=ref_result.total_iterations,
-                         tokens=ref_result.total_tokens)
-                    result["passed"] = True
-                    result["code"] = ref_result.winning_code
-                    result["phase_solved"] = "refinement"
-                    result["total_time_ms"] = (time.time() - start) * 1000
-                    result["events"] = events
-                    return result
+                    passed, stdout, stderr, refinement_evidence = verified_sandbox(ref_result.winning_code)
+                    if passed:
+                        emit("refinement_pass",
+                             f"Refinement solved in {ref_result.total_iterations} iterations!",
+                             strategy="refinement",
+                             iterations=ref_result.total_iterations,
+                             tokens=ref_result.total_tokens)
+                        result["passed"] = True
+                        result["code"] = ref_result.winning_code
+                        result["phase_solved"] = "refinement"
+                        result["total_time_ms"] = (time.time() - start) * 1000
+                        result["verification_evidence"] = refinement_evidence
+                        result["events"] = events
+                        return result
+                    emit("refinement_verify_failed", (stderr or "")[:200])
                 emit("refinement_failed", f"Exhausted {ref_result.total_iterations} iterations")
             except Exception as e:
                 emit("refinement_error", str(e)[:200])
@@ -1566,7 +1813,7 @@ class V3PipelineService:
                 result["total_tokens"] += dc_result.total_tokens
                 if dc_result.solved:
                     # Verify with real sandbox
-                    passed, _, _ = verified_sandbox(dc_result.final_code)
+                    passed, _, _, derivation_evidence = verified_sandbox(dc_result.final_code)
                     if passed:
                         emit("derivation_pass", "Derivation chains solved!",
                              strategy="derivation")
@@ -1574,6 +1821,7 @@ class V3PipelineService:
                         result["code"] = dc_result.final_code
                         result["phase_solved"] = "derivation"
                         result["total_time_ms"] = (time.time() - start) * 1000
+                        result["verification_evidence"] = derivation_evidence
                         result["events"] = events
                         return result
                 emit("derivation_failed", dc_result.reason)
@@ -1588,114 +1836,6 @@ class V3PipelineService:
         result["total_time_ms"] = (time.time() - start) * 1000
         result["events"] = events
         return result
-
-
-# --- Build Verification (per-file-type) --------------------------------------
-
-class BuildVerifier:
-    """Generates file-type-appropriate verification commands.
-
-    Instead of stdin/stdout test pairs (for algorithm problems), this generates
-    build/compile/import commands appropriate for arbitrary code files.
-    """
-
-    # Extension → (verification commands, description)
-    VERIFY_MAP = {
-        ".py": (["python -m py_compile {file}"], "Python compile check"),
-        ".ts": (["npx tsc --noEmit"], "TypeScript type check"),
-        ".tsx": (["npx tsc --noEmit"], "TypeScript/React type check"),
-        ".js": (["node --check {file}"], "JavaScript syntax check"),
-        ".jsx": (["node --check {file}"], "JavaScript/React syntax check"),
-        ".go": (["go build ."], "Go build"),
-        ".rs": (["cargo check"], "Rust cargo check"),
-        ".c": (["gcc -fsyntax-only {file}"], "C syntax check"),
-        ".h": (["gcc -fsyntax-only {file}"], "C header syntax check"),
-        ".cpp": (["g++ -fsyntax-only {file}"], "C++ syntax check"),
-        ".sh": (["bash -n {file}"], "Shell syntax check"),
-        ".bash": (["bash -n {file}"], "Shell syntax check"),
-        ".json": (['python -c "import json; json.load(open(\'{file}\'))"'], "JSON validation"),
-    }
-
-    # Framework → build command override
-    FRAMEWORK_BUILD = {
-        "nextjs": "npx next build",
-        "react": "npx react-scripts build",
-        "flask": "python -m py_compile {file}",
-        "django": "python manage.py check",
-        "express": "node --check {file}",
-    }
-
-    def __init__(self, file_path: str, framework: str = "",
-                 build_command: str = "", working_dir: str = ""):
-        self.file_path = file_path
-        self.framework = framework
-        self.build_command = build_command
-        self.working_dir = working_dir
-        self._ext = Path(file_path).suffix.lower()
-
-    def describe(self) -> str:
-        cmds = self.get_commands()
-        return " && ".join(cmds) if cmds else "no verification available"
-
-    def get_commands(self) -> List[str]:
-        """Return verification commands for this file type."""
-        # Framework-specific override
-        if self.framework and self.framework in self.FRAMEWORK_BUILD:
-            cmd = self.FRAMEWORK_BUILD[self.framework].format(file=self.file_path)
-            return [cmd]
-
-        # Explicit build command from project detection
-        if self.build_command:
-            return [self.build_command]
-
-        # Extension-based
-        if self._ext in self.VERIFY_MAP:
-            cmds, _ = self.VERIFY_MAP[self._ext]
-            return [c.format(file=self.file_path) for c in cmds]
-
-        return []
-
-    def verify_code_in_sandbox(self, code: str, sandbox: SandboxAdapter) -> Tuple[bool, str, str]:
-        """Run the code through sandbox with appropriate verification.
-
-        For Python files, we can execute directly.
-        For other languages, we check syntax/compilation.
-        """
-        if self._ext == ".py":
-            return sandbox(code)
-
-        # For non-Python, the sandbox only supports Python execution.
-        # Wrap verification in a Python script that writes the file
-        # and runs the verification command.
-        if self.get_commands():
-            verify_script = self._build_verify_script(code)
-            return sandbox(verify_script)
-
-        # Fallback: basic syntax check
-        return sandbox(code)
-
-    def _build_verify_script(self, code: str) -> str:
-        """Build a Python script that writes the file and runs verification."""
-        import shlex
-        cmds = self.get_commands()
-        code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
-
-        lines = [
-            "import subprocess, tempfile, os, sys",
-            "tmpdir = tempfile.mkdtemp()",
-            f"filepath = os.path.join(tmpdir, '{Path(self.file_path).name}')",
-            f"with open(filepath, 'w') as f:",
-            f"    f.write('''{code}''')",
-            "os.chdir(tmpdir)",
-        ]
-        for cmd in cmds:
-            lines.append(f"r = subprocess.run({shlex.quote(cmd)}, shell=True, capture_output=True, text=True, timeout=30)")
-            lines.append("if r.returncode != 0:")
-            lines.append("    print(r.stderr, file=sys.stderr)")
-            lines.append("    sys.exit(1)")
-
-        lines.append("print('BUILD_VERIFY_PASS')")
-        return "\n".join(lines)
 
 
 # --- Problem Builder for /v3/generate ----------------------------------------
@@ -3005,11 +3145,9 @@ class V3Handler(BaseHTTPRequestHandler):
         # Build file context for the pipeline
         files = dict(project_context) if project_context else {}
 
-        # Determine build verification for this file type
-        build_verifier = BuildVerifier(file_path, framework, build_command, working_dir)
-
         print(f"[generate] file={file_path} framework={framework} tier=T{tier}", flush=True)
-        print(f"[generate] build_verify: {build_verifier.describe()}", flush=True)
+        if build_command:
+            print(f"[generate] requested build command: {build_command}", flush=True)
         print(f"[generate] constraints: {constraints}", flush=True)
 
         # Stream V3 pipeline progress as SSE events, then final result as JSON
@@ -3042,6 +3180,8 @@ class V3Handler(BaseHTTPRequestHandler):
             progress_callback=emit_progress,
             files=files,
             file_path=file_path,  # PC-048: language-aware smoke check
+            build_command=build_command,
+            working_dir=working_dir or "/workspace",
         )
         _post_pattern_outcome(problem, result)
 
@@ -3060,6 +3200,7 @@ class V3Handler(BaseHTTPRequestHandler):
             "winning_score": 0.0,
             "total_tokens": result.get("total_tokens", 0),
             "total_time_ms": result.get("total_time_ms", 0.0),
+            "verification_evidence": result.get("verification_evidence", []),
         }
         final = json.dumps(response)
         try:

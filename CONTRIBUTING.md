@@ -54,8 +54,8 @@ git checkout -b feature/your-feature-name
 cp .env.example .env
 # Edit .env if you need to change model path or ports
 
-# Run tests before making changes
-python tests/validate_tests.py
+# Run the complete developer quality gate before making changes
+python scripts/production-readiness.py
 ```
 
 #### Making Changes
@@ -84,7 +84,7 @@ Examples:
 
 #### Submitting
 
-1. Ensure all tests pass: `python tests/validate_tests.py`
+1. Ensure all required checks pass: `python scripts/production-readiness.py`
 2. Update CHANGELOG.md if applicable
 3. Push to your fork
 4. Open a pull request with:
@@ -191,8 +191,11 @@ fi
 ### Running Tests
 
 ```bash
-# Run all tests
-python tests/validate_tests.py
+# Run the developer quality gate
+python scripts/production-readiness.py
+
+# Run only the test-integrity validator
+python scripts/production-readiness.py --only test-integrity
 
 # Run specific test file
 pytest tests/v3/test_plan_search.py -v

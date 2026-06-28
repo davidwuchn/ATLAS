@@ -52,7 +52,7 @@ These variables are read by `docker-compose.yml` and control host-side port mapp
 | `ATLAS_ROCM_TAG` | `6.2-complete` | **ROCm only.** Base image tag for `rocm/dev-ubuntu-22.04`. Bump when you want to test a newer ROCm release. |
 | `ATLAS_HSA_OVERRIDE_GFX_VERSION` | (unset) | **ROCm only.** Force a specific HSA gfx version at runtime — workaround for "officially unsupported" GPUs (e.g., older Vega) that still work with a compatible target. Example: `10.3.0` makes RDNA1 cards masquerade as RDNA2 for HIP kernel selection. |
 
-Docker Compose also sets inter-service URLs using Docker networking (e.g., `http://llama-server:8080`). These are hardcoded in `docker-compose.yml` and do not need to be configured by users.
+Docker Compose also sets inter-service URLs using Docker networking (e.g., `http://llama-server:8080`). These are fixed inside the Docker network and usually do not need to be configured by users. On macOS Metal, `docker-compose.macos.yml` keeps the container-side URL at `llama-server:8080` but forwards it to the native host-side `${ATLAS_LLAMA_PORT:-8080}`, so the port can move when 8080 is already occupied.
 
 #### Backend-vs-Compose-override matrix
 

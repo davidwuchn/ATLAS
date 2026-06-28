@@ -97,6 +97,16 @@ def _read_dotenv() -> Dict[str, str]:
 
 _ENV = _read_dotenv()
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name) or _ENV.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
 # Defaults — shell env first, then the compose .env, then a bundled fallback.
 PROXY_URL    = os.environ.get("ATLAS_PROXY_URL",     "http://localhost:8090")
 LLAMA_URL    = os.environ.get("ATLAS_INFERENCE_URL", "http://localhost:8080")
@@ -106,6 +116,7 @@ V3_URL       = os.environ.get("ATLAS_V3_URL",        "http://localhost:8070")
 MODEL_DIR    = os.environ.get("ATLAS_MODELS_DIR")  or _ENV.get("ATLAS_MODELS_DIR", "./models")
 MODEL_FILE   = os.environ.get("ATLAS_MODEL_FILE")  or _ENV.get("ATLAS_MODEL_FILE", "Qwen3.5-9B-Q6_K.gguf")
 MODEL_NAME   = os.environ.get("ATLAS_MODEL_NAME")  or _ENV.get("ATLAS_MODEL_NAME", "Qwen3.5-9B-Q6_K")
+LLAMA_PORT   = _env_int("ATLAS_LLAMA_PORT", 8080)
 # Match docker-compose.yml's `${ATLAS_LENS_MODELS:-./geometric-lens/geometric_lens/models}`
 # host-side bind-mount source so doctor checks the same directory the
 # container will actually receive.
@@ -484,15 +495,15 @@ def _check_metal_native() -> CheckResult:
     # (not fail) — they may just not be ready yet. Use a small Python
     # socket probe instead of `nc` since macOS / BSD nc has different
     # flags than GNU nc and may not be on PATH at all.
-    if not _port_listening("127.0.0.1", 8080, timeout=2):
+    if not _port_listening("127.0.0.1", LLAMA_PORT, timeout=2):
         return CheckResult("metal-native", "warn",
             f"native llama-server installed at {binary} but nothing "
-            f"listening on :8080 — start it with scripts/atlas-llama-macos.sh",
+            f"listening on :{LLAMA_PORT} — start it with scripts/atlas-llama-macos.sh",
             "Open a separate terminal and run the launcher; this check "
             "will turn green once the server is up and serving.")
 
     return CheckResult("metal-native", "pass",
-        f"native llama-server up at {binary}, listening on :8080")
+        f"native llama-server up at {binary}, listening on :{LLAMA_PORT}")
 
 
 def _compose_ps(project_dir: str) -> List[Dict]:
@@ -1131,7 +1142,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # 3.6. macOS hybrid path (#32) — verify native llama-server binary
     # exists at the setup-script's install prefix, is executable, and
-    # is listening on :8080 (so the socat compose forward will succeed).
+    # is listening on ATLAS_LLAMA_PORT (so the socat compose forward
+    # will succeed).
     # Only fires when backend == metal so it's noise-free on
     # cuda/rocm/vulkan hosts.
     if backend == "metal":

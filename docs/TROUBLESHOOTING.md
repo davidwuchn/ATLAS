@@ -888,13 +888,30 @@ fell back to direct write.
 language-aware. The V3 pipeline derives language from
 the target file's extension (`pipeline.run(file_path=…)`)
 and routes:
-- `.py` → AST/compile smoke (existing behavior)
-- `.html` / `.htm` / `.xml` → `html.parser` strict mode
+- `.py` → Python parse/compile
+- `.js` / `.mjs` / `.cjs` → `node --check`
+- `.ts` / `.tsx` → `tsc --noEmit --strict`
+- `.go` → `gofmt -e`
+- `.rs` → `rustc` syntax check
+- `.c` / `.cpp` → compiler `-fsyntax-only`
+- `.sh` / `.bash` → `bash -n`
+- `.html` / `.htm` → `html.parser`
+- `.xml` → `xml.etree.ElementTree`
 - `.json` → `json.loads`
-- `.yaml` / `.yml` → `yaml.safe_load` (or skip if PyYAML
-  unavailable)
-- everything else (CSS, JS, MD, plain text, TOML, …) →
-  pass-through with `SMOKE_SKIP (non-Python)`
+- `.yaml` / `.yml` → `yaml.safe_load`
+
+Unknown formats fail with an explicit "syntax verification
+unavailable" error instead of passing without evidence.
+
+If `/v3/generate` receives an approved project build command, V3 emits a
+`build_verify` event after syntax/self-test verification. The command runs in
+an ephemeral sandbox workspace with the candidate overlaid onto the project, so
+failed build evidence blocks `passed=true` without writing the candidate into
+the real checkout. Overlay snapshots intentionally skip dependency caches,
+secrets, model/data artifacts, symlinks, and large files, and enforce file-count
+and byte limits. If a project needs heavyweight dependencies to build, install
+them inside the sandbox workspace as part of the explicit verification workflow
+or use release/container qualification for that project.
 
 **Diagnose:**
 ```bash

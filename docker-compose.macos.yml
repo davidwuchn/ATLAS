@@ -28,7 +28,7 @@
 # until it's up.
 #
 # Verify with:
-#   curl http://localhost:8080/health    # should hit native llama-server
+#   curl "http://localhost:${ATLAS_LLAMA_PORT:-8080}/health"    # should hit native llama-server
 #   atlas doctor                         # check_metal_native confirms wiring
 
 services:
@@ -59,14 +59,17 @@ services:
     # without any host publish needed.
     ports: !reset []
     # The actual forwarding: listen on every interface port 8080 inside
-    # the container, forward TCP to host.docker.internal:8080 (Docker
-    # Desktop for Mac auto-resolves this to the host's loopback).
+    # the container, forward TCP to host.docker.internal:$ATLAS_LLAMA_PORT
+    # (Docker Desktop for Mac auto-resolves this to the host's loopback).
+    # Keep the container-side port fixed at 8080 so the rest of the stack
+    # can continue using http://llama-server:8080, while the native
+    # host-side port can move when 8080 is already occupied.
     # fork = handle multiple concurrent clients (proxy + v3 + lens all
     # connect simultaneously). reuseaddr = recover from restarts
     # cleanly without TIME_WAIT delays.
     command: >
       TCP-LISTEN:8080,fork,reuseaddr
-      TCP:host.docker.internal:8080
+      TCP:host.docker.internal:${ATLAS_LLAMA_PORT:-8080}
     # Health check: alpine/socat is minimal — no nc, no wget, no
     # ss/netstat. The only thing we're guaranteed to have is socat
     # itself + /proc. Checking that PID 1 is socat is the cheapest

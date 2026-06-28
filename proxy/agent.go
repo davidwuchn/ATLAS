@@ -10,10 +10,10 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"strconv"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -172,9 +172,9 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 					log.Printf("[symbol_index] injected %d snippet(s) for [%s] from %d project files",
 						len(idx.Matched), strings.Join(names, ", "), len(fileMap))
 					ctx.Stream("symbol_index_injected", map[string]interface{}{
-						"matched":  names,
-						"n_files":  len(fileMap),
-						"skipped":  len(idx.Skipped),
+						"matched": names,
+						"n_files": len(fileMap),
+						"skipped": len(idx.Skipped),
 					})
 				}
 			}
@@ -199,15 +199,15 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 	// Get the constrained output schema
 	schemaJSON := buildToolCallSchemaJSON()
 
-	consecutiveReads := 0       // Track consecutive read-only calls
-	consecutiveErrors := 0      // Track consecutive tool failures to break error loops
+	consecutiveReads := 0  // Track consecutive read-only calls
+	consecutiveErrors := 0 // Track consecutive tool failures to break error loops
 	// edit_file old_str-mismatch failures per path. A successful read_file
 	// between attempts resets consecutiveErrors/RecentFailurePaths, which
 	// masks the classic read→edit-miss→read loop (smaller models can't
 	// reproduce old_str byte-for-byte). This counter survives interleaved
 	// reads so we can force the ast_edit steer after the second miss.
 	editMissByPath := map[string]int{}
-	repeatDetections := 0       // hard-stop after the 2nd repeated-identical-call detection
+	repeatDetections := 0         // hard-stop after the 2nd repeated-identical-call detection
 	madeProductiveChange := false // Set when a write/edit/delete succeeds in this run.
 	// Used to soften the consecutiveErrors exit: post-write run_command failures
 	// are usually verification noise, not "stuck loop" — see PC-025 Sub-finding B.
@@ -581,6 +581,20 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				}
 			}
 
+			// Enforce the workspace boundary before any pre-execution gate reads
+			// a path. executeToolCall repeats this check for parallel dispatch.
+			if rejection := validateToolWorkspacePaths(parsed.Name, parsed.Args, ctx); rejection != "" {
+				ctx.Messages = append(ctx.Messages, AgentMessage{Role: "assistant", Content: response})
+				ctx.Messages = append(ctx.Messages, AgentMessage{
+					Role:       "tool",
+					Content:    fmt.Sprintf(`{"success":false,"error":%q}`, rejection),
+					ToolCallID: fmt.Sprintf("call_%d", turn),
+					ToolName:   parsed.Name,
+				})
+				consecutiveErrors++
+				continue
+			}
+
 			// Surgical-edit gate: reject write_file on existing files
 			// outright. write_file is for *creating* files; edits to an
 			// existing file must use edit_file with old_str/new_str.
@@ -772,10 +786,10 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 			if msg, repeating := recordReasoning(ctx, ctx.LastTurnReasoning); repeating {
 				log.Printf("[agent] reasoning repetition at turn %d (consecutive=%d) — queuing corrective", turn, ctx.ConsecutiveReasoningRepeats+1)
 				ctx.Stream("agent_reasoning_intervention", map[string]interface{}{
-					"turn":                  turn,
-					"consecutive":           ctx.ConsecutiveReasoningRepeats + 1,
-					"reason":                msg,
-					"snippet":               ctx.LastReasoningSnippet,
+					"turn":        turn,
+					"consecutive": ctx.ConsecutiveReasoningRepeats + 1,
+					"reason":      msg,
+					"snippet":     ctx.LastReasoningSnippet,
 				})
 				pendingReasoningCorrective = msg
 				// Reset so we don't re-fire on the same loop.
@@ -807,13 +821,13 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 						score.Aggregate.FirstOffRailsIdx, score.NTokens,
 						score.LatencyMS, formatScoreSlice(ctx.LensScoreHistory))
 					ctx.Stream("agent_lens_score", map[string]interface{}{
-						"tool":                 parsed.Name,
-						"turn":                 turn,
-						"n_tokens":             score.NTokens,
-						"first_off_rails_idx":  score.Aggregate.FirstOffRailsIdx,
-						"gx_score_min":         score.Aggregate.GxScoreMin,
-						"gx_score_mean":        score.Aggregate.GxScoreMean,
-						"latency_ms":           score.LatencyMS,
+						"tool":                parsed.Name,
+						"turn":                turn,
+						"n_tokens":            score.NTokens,
+						"first_off_rails_idx": score.Aggregate.FirstOffRailsIdx,
+						"gx_score_min":        score.Aggregate.GxScoreMin,
+						"gx_score_mean":       score.Aggregate.GxScoreMean,
+						"latency_ms":          score.LatencyMS,
 					})
 					if msg, intervene := agentLensRegression(ctx.LensScoreHistory, score.lowThreshold(), score.severeThreshold()); intervene {
 						log.Printf("[agent] lens regression at turn %d on %s — queuing corrective for next turn", turn, parsed.Name)
@@ -1677,7 +1691,7 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 	}
 
 	var (
-		contentBuf     strings.Builder
+		contentBuf strings.Builder
 		// PC-?: capture reasoning_content separately so we can fall
 		// back to it when contentBuf is empty. Qwen3.5 occasionally
 		// engages thinking mode despite enable_thinking=false (most
@@ -1884,7 +1898,6 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 	}
 	return contentBuf.String(), totalTokens, nil
 }
-
 
 // ---------------------------------------------------------------------------
 // Permission checking
@@ -2244,7 +2257,7 @@ func handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type historyMsg struct {
-		Role    string `json:"role"`    // "user" or "assistant"
+		Role    string `json:"role"` // "user" or "assistant"
 		Content string `json:"content"`
 	}
 	var req struct {
@@ -2579,12 +2592,13 @@ func classifyParseFailure(raw string) string {
 // branching but emits codes instead of prose.
 //
 // Categories:
-//   empty           — response was whitespace
-//   prose           — response is non-JSON text (model narration leaking)
-//   truncated_tool  — JSON tool_call envelope cut off mid-args (max_tokens)
-//   html_entities   — tool_call contains &lt; / &gt; / &amp; in string args
-//   malformed_tool  — tool_call envelope present but JSON malformed
-//   non_json        — response begins with text other than '{'
+//
+//	empty           — response was whitespace
+//	prose           — response is non-JSON text (model narration leaking)
+//	truncated_tool  — JSON tool_call envelope cut off mid-args (max_tokens)
+//	html_entities   — tool_call contains &lt; / &gt; / &amp; in string args
+//	malformed_tool  — tool_call envelope present but JSON malformed
+//	non_json        — response begins with text other than '{'
 func categorizeParseFailure(raw string) string {
 	stripped := strings.TrimSpace(raw)
 	if stripped == "" {

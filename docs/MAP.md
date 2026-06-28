@@ -469,7 +469,7 @@ Each loader downloads from HuggingFace (JSON rows API, no pyarrow) and normalize
 
 | File | Description |
 |------|-------------|
-| [`main.py`](../v3-service/main.py) | HTTP server (port 8070). Pipeline orchestrator: Phase 0 (probe) -> Phase 2 (allocate K) -> Phase 1 (generate) -> Selection -> Phase 3 (repair). LLMAdapter, EmbedAdapter, SandboxAdapter, BuildVerifier. Imports all 19 V3 modules. |
+| [`main.py`](../v3-service/main.py) | HTTP server (port 8070). Pipeline orchestrator: Phase 0 (probe) -> Phase 2 (allocate K) -> Phase 1 (generate) -> Selection -> Phase 3 (repair). LLMAdapter, EmbedAdapter, and SandboxAdapter wire generation, embeddings, and syntax checks. Imports all 19 V3 modules. |
 | [`Dockerfile`](../v3-service/Dockerfile) | Python 3.11, CPU PyTorch, copies benchmark/ for V3 module access. Port 8070. |
 
 <a id="sandbox"></a>

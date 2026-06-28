@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Bash/Shell
     bash \
     # Node.js (via nodesource)
-    curl ca-certificates gnupg \
+    curl ca-certificates gnupg unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 20 LTS
@@ -29,9 +29,17 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustc --version && cargo --version
 
-# Install TypeScript globally
-RUN npm install -g typescript tsx
-RUN tsc --version
+# Install JavaScript/TypeScript verification tools and package managers.
+# Project detection may select npm, pnpm, yarn, or bun from lockfiles; the
+# sandbox needs all of them available for build-command verification to be
+# accurate.
+RUN npm install -g typescript tsx pnpm yarn
+RUN tsc --version && pnpm --version && yarn --version
+
+# Install Bun for bun.lockb projects.
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+RUN bun --version
 
 # Pre-baked Python deps — kept INTENTIONALLY MINIMAL after PC-191.
 #

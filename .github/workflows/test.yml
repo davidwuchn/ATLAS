@@ -38,8 +38,10 @@ jobs:
           cache-dependency-path: ${{ matrix.module }}/go.sum
 
       - name: go test -race
-        working-directory: ${{ matrix.module }}
-        run: go test -race ./...
+        run: python scripts/production-readiness.py --only go-${{ matrix.module }}-test
+
+      - name: go vet
+        run: python scripts/production-readiness.py --only go-${{ matrix.module }}-vet
 
   python-tests:
     name: pytest (${{ matrix.subset }})
@@ -74,14 +76,7 @@ jobs:
           pip install tree_sitter tree_sitter_python tree_sitter_javascript
 
       - name: pytest
-        run: |
-          # If the subset directory doesn't exist, skip cleanly rather
-          # than failing CI with "no tests collected".
-          if [[ -d "${{ matrix.subset }}" ]]; then
-            pytest "${{ matrix.subset }}" --no-header -q
-          else
-            echo "::notice::${{ matrix.subset }} not present — skipping"
-          fi
+        run: python scripts/production-readiness.py --only python-tests --pytest-path "${{ matrix.subset }}"
 
   ruff:
     name: ruff (python lint)
@@ -103,8 +98,7 @@ jobs:
         # entries from --ignore as the codebase gets cleaner.
         run: |
           pip install ruff
-          ruff check --select F --ignore F401,F541,F841 \
-            atlas/ tests/ benchmark/ geometric-lens/ v3-service/ sandbox/
+          python scripts/production-readiness.py --only ruff
 
   shellcheck:
     name: shellcheck
@@ -119,10 +113,7 @@ jobs:
         # --severity=error catches real bugs (unquoted vars in dangerous
         # contexts, misuse of [[ ]], etc) without bikeshedding on style.
         # Bump to `warning` later once the scripts are stable.
-        run: |
-          shellcheck --severity=error \
-            scripts/atlas-bootstrap.sh \
-            scripts/download-models.sh
+        run: python scripts/production-readiness.py --only shellcheck
 
   compose-validate:
     name: docker compose config
@@ -134,9 +125,7 @@ jobs:
         # The runner has docker compose v2 pre-installed. `config -q`
         # parses + validates docker-compose.yml without pulling images.
         # Set dummy env so vars don't fail the parse.
-        run: |
-          touch .env  # compose reads .env for ${VAR} interpolation
-          docker compose config -q
+        run: python scripts/production-readiness.py --only compose
 
   yamllint:
     name: yamllint (workflows)
@@ -147,9 +136,7 @@ jobs:
       - name: yamllint
         run: |
           pip install yamllint
-          # Only lint workflow YAML — docker-compose.yml is validated
-          # by compose-validate above; broader yamllint can come later.
-          yamllint -d "{rules: {line-length: disable, document-start: disable}}" .github/workflows/
+          python scripts/production-readiness.py --only workflow-yaml
 
   llama-patches-apply:
     # Smoke test: verifies the PC-202 hidden-states + spec-decode

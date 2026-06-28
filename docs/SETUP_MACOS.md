@@ -141,7 +141,9 @@ Stop with Ctrl-C. On stop the docker stack's proxy will start serving 502s until
 docker compose -f docker-compose.yml -f docker-compose.macos.yml up -d
 ```
 
-The macOS overlay swaps the `llama-server` service for a tiny `alpine/socat` container that forwards `llama-server:8080` → `host.docker.internal:8080` (where the native server you started in Step 3 is listening). The other 4 services (proxy, v3, lens, sandbox) come up unchanged from the base compose file.
+The macOS overlay swaps the `llama-server` service for a tiny `alpine/socat` container that forwards Docker-internal `llama-server:8080` → `host.docker.internal:${ATLAS_LLAMA_PORT:-8080}` (where the native server you started in Step 3 is listening). The other 4 services (proxy, v3, lens, sandbox) come up unchanged from the base compose file.
+
+If port 8080 is already occupied, set `ATLAS_LLAMA_PORT` in `.env` or launch with `./scripts/atlas-llama-macos.sh --port 8081`, then bring the compose stack up with the same `ATLAS_LLAMA_PORT` value. The container-side URL remains `http://llama-server:8080`; only the native host-side port changes.
 
 First-time pull is small (~30 MB for socat + ~200 MB for redis if not cached; the v3 / lens / proxy / sandbox images come from GHCR, ~600 MB total).
 
@@ -179,7 +181,7 @@ Same UX as Linux + CUDA. The TUI connects to the proxy on localhost:8090; the pr
 Your Mac
  |
  |- Native process: ./scripts/atlas-llama-macos.sh
- |   |- llama-server-metal listening on :8080 (Apple GPU via Metal)
+ |   |- llama-server-metal listening on :${ATLAS_LLAMA_PORT:-8080} (Apple GPU via Metal)
  |
  |- Docker Desktop
      |- docker-compose stack (4 services):
@@ -188,7 +190,7 @@ Your Mac
      |   |- geometric-lens     (Python, port 8099)
      |   |- sandbox            (Python, port 30820)
      |   |- redis              (existing service)
-     |   |- llama-server slot  ← socat: forwards :8080 to host.docker.internal:8080
+     |   |- llama-server slot  ← socat: forwards container :8080 to host.docker.internal:${ATLAS_LLAMA_PORT:-8080}
      |
      |- (Each service connects to http://llama-server:8080 from the base
      |   compose file — that name now resolves to the socat container which
@@ -211,7 +213,7 @@ You haven't run the setup script, or you ran it with a custom `--prefix` and the
 - Run `./scripts/atlas-setup-macos.sh` (no flags)
 - Or symlink: `ln -s /your/custom/prefix/bin/llama-server-metal ~/.atlas/macos/bin/`
 
-### `atlas doctor` says `metal-native: warn — nothing listening on :8080`
+### `atlas doctor` says `metal-native: warn — nothing listening on the configured llama port`
 
 The binary is installed but you haven't started it. Open a new terminal and run `./scripts/atlas-llama-macos.sh`. The launcher stays in the foreground; leave it running.
 

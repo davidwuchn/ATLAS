@@ -107,10 +107,11 @@ type ToolResult struct {
 	Error   string          `json:"error,omitempty"`
 
 	// V3 metadata (populated when V3 pipeline was used)
-	V3Used           bool    `json:"v3_used,omitempty"`
-	CandidatesTested int     `json:"candidates_tested,omitempty"`
-	WinningScore     float64 `json:"winning_score,omitempty"`
-	PhaseSolved      string  `json:"phase_solved,omitempty"`
+	V3Used               bool                     `json:"v3_used,omitempty"`
+	CandidatesTested     int                      `json:"candidates_tested,omitempty"`
+	WinningScore         float64                  `json:"winning_score,omitempty"`
+	PhaseSolved          string                   `json:"phase_solved,omitempty"`
+	VerificationEvidence []V3VerificationEvidence `json:"verification_evidence,omitempty"`
 }
 
 // MarshalText returns a compact string representation for the model.
@@ -174,11 +175,12 @@ type WriteFileInput struct {
 }
 
 type WriteFileOutput struct {
-	BytesWritten     int     `json:"bytes_written"`
-	V3Used           bool    `json:"v3_used,omitempty"`
-	CandidatesTested int     `json:"candidates_tested,omitempty"`
-	WinningScore     float64 `json:"winning_score,omitempty"`
-	PhaseSolved      string  `json:"phase_solved,omitempty"`
+	BytesWritten         int                      `json:"bytes_written"`
+	V3Used               bool                     `json:"v3_used,omitempty"`
+	CandidatesTested     int                      `json:"candidates_tested,omitempty"`
+	WinningScore         float64                  `json:"winning_score,omitempty"`
+	PhaseSolved          string                   `json:"phase_solved,omitempty"`
+	VerificationEvidence []V3VerificationEvidence `json:"verification_evidence,omitempty"`
 }
 
 // -- edit_file --
@@ -191,10 +193,10 @@ type EditFileInput struct {
 }
 
 type EditFileOutput struct {
-	OK          bool   `json:"ok"`
-	DiffPreview string `json:"diff_preview,omitempty"`
-	LinesAdded  int    `json:"lines_added,omitempty"`
-	LinesRemoved int   `json:"lines_removed,omitempty"`
+	OK           bool   `json:"ok"`
+	DiffPreview  string `json:"diff_preview,omitempty"`
+	LinesAdded   int    `json:"lines_added,omitempty"`
+	LinesRemoved int    `json:"lines_removed,omitempty"`
 }
 
 // -- ast_edit (GH #39 v1) --
@@ -217,11 +219,11 @@ type AstEditInput struct {
 }
 
 type AstEditOutput struct {
-	OK         bool   `json:"ok"`
-	Selector   string `json:"selector"`
-	Language   string `json:"language,omitempty"`
-	BytesOld   int    `json:"bytes_old,omitempty"`
-	BytesNew   int    `json:"bytes_new,omitempty"`
+	OK       bool   `json:"ok"`
+	Selector string `json:"selector"`
+	Language string `json:"language,omitempty"`
+	BytesOld int    `json:"bytes_old,omitempty"`
+	BytesNew int    `json:"bytes_new,omitempty"`
 }
 
 // -- delete_file --
@@ -324,9 +326,9 @@ type StopBackgroundOutput struct {
 // -- search_files --
 
 type SearchFilesInput struct {
-	Pattern string `json:"pattern"`           // regex pattern
-	Path    string `json:"path,omitempty"`    // directory to search in
-	Glob    string `json:"glob,omitempty"`    // file glob filter (e.g., "*.go")
+	Pattern string `json:"pattern"`        // regex pattern
+	Path    string `json:"path,omitempty"` // directory to search in
+	Glob    string `json:"glob,omitempty"` // file glob filter (e.g., "*.go")
 }
 
 type SearchMatch struct {
@@ -366,9 +368,9 @@ type ListDirectoryInput struct {
 }
 
 type DirEntry struct {
-	Name  string `json:"name"`
-	Type  string `json:"type"` // "file", "dir", "symlink"
-	Size  int64  `json:"size,omitempty"`
+	Name string `json:"name"`
+	Type string `json:"type"` // "file", "dir", "symlink"
+	Size int64  `json:"size,omitempty"`
 }
 
 type ListDirectoryOutput struct {
@@ -408,9 +410,9 @@ type AgentContext struct {
 	// Configuration
 	Tier           Tier
 	MaxTurns       int
-	WorkingDir     string       // Project directory for agent operations (container path, e.g. /workspace)
-	RealProjectDir string       // Same as WorkingDir; kept for delete_file compatibility
-	HostWorkingDir string       // The host-side path that's bind-mounted as WorkingDir
+	WorkingDir     string // Project directory for agent operations (container path, e.g. /workspace)
+	RealProjectDir string // Same as WorkingDir; kept for delete_file compatibility
+	HostWorkingDir string // The host-side path that's bind-mounted as WorkingDir
 	// (e.g. /home/isaac/snake when /workspace is mounted from there).
 	// Used to translate absolute host paths the model receives back from
 	// the user's prompt — e.g. "fix /home/isaac/snake/app.py" — into
@@ -420,10 +422,10 @@ type AgentContext struct {
 	YoloMode       bool
 
 	// Service URLs
-	InferenceURL     string
-	SandboxURL string
-	LensURL     string
-	V3URL      string
+	InferenceURL string
+	SandboxURL   string
+	LensURL      string
+	V3URL        string
 
 	// BypassV3 short-circuits every V3 pipeline call in this request's
 	// lifecycle (writeFileWithV3 / improveContentWithV3). The agent loop,
@@ -446,7 +448,7 @@ type AgentContext struct {
 	Project *ProjectInfo
 
 	// State
-	Messages     []AgentMessage
+	Messages []AgentMessage
 	// PriorHistory is the prior-turn user/assistant transcript, sent by
 	// the TUI on each /v1/agent request so the agent can answer follow-ups
 	// like "what did you just delete?" — without it, every user message
@@ -454,10 +456,10 @@ type AgentContext struct {
 	// from the request body; consumed once at the top of runAgentLoop
 	// and then ignored. Tool/system rows are filtered out at the TUI
 	// boundary; only role=user|assistant text turns flow through here.
-	PriorHistory []AgentMessage
+	PriorHistory  []AgentMessage
 	FileReadTimes map[string]time.Time // for staleness detection
 	FilesRead     map[string]string    // cache of read file contents
-	TotalTokens  int
+	TotalTokens   int
 
 	// SessionWrites tracks files this agent loop wrote during this run.
 	// The write_file guard rejects overwrites of "existing" files >5
@@ -514,7 +516,7 @@ type AgentContext struct {
 	// See proxy/agent.go error-loop break for the use site.
 	RecentFailurePaths []string
 
-	mu           sync.Mutex
+	mu sync.Mutex
 
 	// Plan is the optional pre-flight plan produced by /v3/plan. Set
 	// once at the top of the agent loop for non-trivial requests; nil
@@ -671,13 +673,27 @@ type V3GenerateRequest struct {
 
 // V3GenerateResponse is the response from the V3 service.
 type V3GenerateResponse struct {
-	Code             string  `json:"code"`
-	Passed           bool    `json:"passed"`
-	PhaseSolved      string  `json:"phase_solved"`
-	CandidatesTested int     `json:"candidates_tested"`
-	WinningScore     float64 `json:"winning_score"`
-	TotalTokens      int     `json:"total_tokens"`
-	TotalTimeMs      float64 `json:"total_time_ms"`
+	Code                 string                   `json:"code"`
+	Passed               bool                     `json:"passed"`
+	PhaseSolved          string                   `json:"phase_solved"`
+	CandidatesTested     int                      `json:"candidates_tested"`
+	WinningScore         float64                  `json:"winning_score"`
+	TotalTokens          int                      `json:"total_tokens"`
+	TotalTimeMs          float64                  `json:"total_time_ms"`
+	VerificationEvidence []V3VerificationEvidence `json:"verification_evidence,omitempty"`
+}
+
+// V3VerificationEvidence describes the concrete verifier that accepted or
+// rejected a V3 candidate. It is intentionally small and bounded by the V3
+// service before crossing the wire.
+type V3VerificationEvidence struct {
+	Verifier   string `json:"verifier"`
+	Command    string `json:"command,omitempty"`
+	Status     string `json:"status"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
+	DurationMs int    `json:"duration_ms,omitempty"`
+	Stdout     string `json:"stdout,omitempty"`
+	Stderr     string `json:"stderr,omitempty"`
 }
 
 // LensScore is already defined in main.go — reused here.

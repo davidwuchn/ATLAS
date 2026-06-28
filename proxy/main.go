@@ -8,8 +8,9 @@
 // V3 stages) lives behind the agent loop's `write_file` tool.
 //
 // Usage:
-//   atlas-proxy                  (default port 8090)
-//   ATLAS_LLAMA_URL=http://localhost:8080 atlas-proxy
+//
+//	atlas-proxy                  (default port 8090)
+//	ATLAS_LLAMA_URL=http://localhost:8080 atlas-proxy
 package main
 
 import (
@@ -31,18 +32,20 @@ import (
 
 var (
 	inferenceURL = envOr("ATLAS_INFERENCE_URL", "http://localhost:8080")
-	lensURL     = envOr("ATLAS_LENS_URL", "http://localhost:8099")
-	sandboxURL = envOr("ATLAS_SANDBOX_URL", "http://localhost:30820")
-	proxyPort  = envOr("ATLAS_PROXY_PORT", "8090")
-	modelName  = envOr("ATLAS_MODEL_NAME", "Qwen3.5-9B-Q6_K")
+	lensURL      = envOr("ATLAS_LENS_URL", "http://localhost:8099")
+	sandboxURL   = envOr("ATLAS_SANDBOX_URL", "http://localhost:30820")
+	proxyPort    = envOr("ATLAS_PROXY_PORT", "8090")
+	modelName    = envOr("ATLAS_MODEL_NAME", "Qwen3.5-9B-Q6_K")
+	healthClient = &http.Client{Timeout: 3 * time.Second}
 )
 
 const (
-	maxRepairAttempts = 3
-	gxLowThreshold   = 0.5  // below this → trigger best-of-K
-	gxHighThreshold   = 0.9  // above this → early exit from best-of-K
-	sandboxTimeout    = 8    // seconds
-	interactiveTimeout = 3   // seconds for interactive programs
+	maxRepairAttempts   = 3
+	gxLowThreshold      = 0.5 // below this → trigger best-of-K
+	gxHighThreshold     = 0.9 // above this → early exit from best-of-K
+	sandboxTimeout      = 8   // seconds
+	interactiveTimeout  = 3   // seconds for interactive programs
+	maxRequestBodyBytes = 16 << 20
 )
 
 func envOr(key, fallback string) string {
@@ -107,10 +110,10 @@ func resolveVerifyTarget(workingDir string) string {
 // ---------------------------------------------------------------------------
 
 var (
-	totalRequests   atomic.Int64
-	totalRepairs    atomic.Int64
-	sandboxPasses   atomic.Int64
-	sandboxFails    atomic.Int64
+	totalRequests atomic.Int64
+	totalRepairs  atomic.Int64
+	sandboxPasses atomic.Int64
+	sandboxFails  atomic.Int64
 )
 
 // ---------------------------------------------------------------------------
@@ -144,22 +147,22 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	llmOK, ragOK, sandboxOK, lensReady := false, false, false, false
 
-	if resp, err := http.Get(inferenceURL + "/health"); err == nil {
+	if resp, err := healthClient.Get(inferenceURL + "/health"); err == nil {
 		resp.Body.Close()
 		llmOK = resp.StatusCode == 200
 	}
-	if resp, err := http.Get(lensURL + "/health"); err == nil {
+	if resp, err := healthClient.Get(lensURL + "/health"); err == nil {
 		resp.Body.Close()
 		ragOK = resp.StatusCode == 200
 	}
 	// Geometric-lens /ready is the gate that flips to 503 when scoring is
 	// degraded (lens weights missing, embedding-dim mismatch, etc — see
 	// PC-019). /health stays informational; /ready is the pass/fail.
-	if resp, err := http.Get(lensURL + "/ready"); err == nil {
+	if resp, err := healthClient.Get(lensURL + "/ready"); err == nil {
 		resp.Body.Close()
 		lensReady = resp.StatusCode == 200
 	}
-	if resp, err := http.Get(sandboxURL + "/health"); err == nil {
+	if resp, err := healthClient.Get(sandboxURL + "/health"); err == nil {
 		resp.Body.Close()
 		sandboxOK = resp.StatusCode == 200
 	}
@@ -191,15 +194,15 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 func handleReady(w http.ResponseWriter, r *http.Request) {
 	llmOK, sandboxOK, lensReady := false, false, false
 
-	if resp, err := http.Get(inferenceURL + "/health"); err == nil {
+	if resp, err := healthClient.Get(inferenceURL + "/health"); err == nil {
 		resp.Body.Close()
 		llmOK = resp.StatusCode == 200
 	}
-	if resp, err := http.Get(lensURL + "/ready"); err == nil {
+	if resp, err := healthClient.Get(lensURL + "/ready"); err == nil {
 		resp.Body.Close()
 		lensReady = resp.StatusCode == 200
 	}
-	if resp, err := http.Get(sandboxURL + "/health"); err == nil {
+	if resp, err := healthClient.Get(sandboxURL + "/health"); err == nil {
 		resp.Body.Close()
 		sandboxOK = resp.StatusCode == 200
 	}
@@ -217,9 +220,7 @@ func handleReady(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func main() {
-	log.SetFlags(log.Ltime | log.Lmicroseconds)
-
+func newProxyMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	// /v1/chat/completions used to be wrapped here with the Aider whole-
 	// file output format and embedded agent loop. After PC-062 the TUI
@@ -232,40 +233,52 @@ func main() {
 	mux.HandleFunc("/models", handleModels)
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/ready", handleReady)
-	mux.HandleFunc("/v1/agent", handleAgent) // tool-based agent endpoint
-	mux.HandleFunc("/events", handleEvents)  // PC-061: typed SSE event stream
-	mux.HandleFunc("/cancel", handleCancel)  // PC-062: TUI abort hook
-	mux.HandleFunc("/feedback", handleFeedback) // per-file accept/deny + pass thumbs → lens samples
+	mux.HandleFunc("/v1/agent", handleAgent)                             // tool-based agent endpoint
+	mux.HandleFunc("/events", handleEvents)                              // PC-061: typed SSE event stream
+	mux.HandleFunc("/cancel", handleCancel)                              // PC-062: TUI abort hook
+	mux.HandleFunc("/feedback", handleFeedback)                          // per-file accept/deny + pass thumbs → lens samples
 	mux.HandleFunc("/v1/lens/training-status", handleLensTrainingStatus) // sample counts for the "retrain available" alert
 	// PC-059: TUI calls this on connect to render a Lens/ASA compat badge.
 	mux.HandleFunc("/v1/calibration/status", handleCalibrationStatus)
 
 	// Catch-all: proxy to llama-server
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// %q on the path quotes + escapes CR/LF so a crafted URL can't
-		// fake additional log entries (go/log-injection).
-		log.Printf("passthrough: %s %q", r.Method, r.URL.Path)
-		body, _ := io.ReadAll(r.Body)
-		proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, inferenceURL+r.URL.Path, bytes.NewReader(body))
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
+	mux.HandleFunc("/", handlePassthrough)
+	return mux
+}
+
+func handlePassthrough(w http.ResponseWriter, r *http.Request) {
+	// %q on the path quotes + escapes CR/LF so a crafted URL can't
+	// fake additional log entries (go/log-injection).
+	log.Printf("passthrough: %s %q", r.Method, r.URL.Path)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "request body exceeds the configured limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	upstreamURL := inferenceURL + r.URL.RequestURI()
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	proxyReq.Header = r.Header.Clone()
+	resp, err := http.DefaultClient.Do(proxyReq)
+	if err != nil {
+		http.Error(w, err.Error(), 502)
+		return
+	}
+	defer resp.Body.Close()
+	for k, v := range resp.Header {
+		for _, vv := range v {
+			w.Header().Add(k, vv)
 		}
-		proxyReq.Header = r.Header
-		resp, err := http.DefaultClient.Do(proxyReq)
-		if err != nil {
-			http.Error(w, err.Error(), 502)
-			return
-		}
-		defer resp.Body.Close()
-		for k, v := range resp.Header {
-			for _, vv := range v {
-				w.Header().Add(k, vv)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	})
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func main() {
+	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
 	addr := ":" + proxyPort
 	log.Printf("ATLAS Proxy v3.0.1 starting on %s", addr)
@@ -286,7 +299,14 @@ func main() {
 		log.Printf("  Keep-warm: pinging %s every 45s (set ATLAS_KEEP_LLAMA_WARM=0 to disable)", inferenceURL)
 	}
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           http.MaxBytesHandler(newProxyMux(), maxRequestBodyBytes),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
