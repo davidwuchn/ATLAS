@@ -216,13 +216,16 @@ detect_gpu() {
             GPU_VENDOR="nvidia"
             HAS_NVIDIA=1
             GPU_NAME=$(lspci 2>/dev/null | grep -i 'nvidia' | head -1 | sed 's/.*: //')
-        # AMD GPUs identify as "Advanced Micro Devices" or "ATI"; further
+        # AMD GPUs identify as "Advanced Micro Devices" or "[AMD/ATI]"; further
         # filter to actual display/compute GPUs (skip audio controllers
-        # which also show as AMD).
-        elif lspci 2>/dev/null | grep -iE '(vga|3d|display).*(amd|ati|advanced micro devices)' | grep -qi .; then
+        # which also show as AMD). NOTE: "ati" must be word-bounded (\bati\b)
+        # — a bare "ati" matches the "ati" inside "Corporation", which every
+        # NVIDIA and Intel lspci line contains, and misdetects them as AMD
+        # (GH #129: an RTX 5090 was routed down the ROCm path and failed).
+        elif lspci 2>/dev/null | grep -iE '(vga|3d|display).*(amd|\bati\b|advanced micro devices)' | grep -qi .; then
             GPU_VENDOR="amd"
             HAS_AMD=1
-            GPU_NAME=$(lspci 2>/dev/null | grep -iE '(vga|3d|display).*(amd|ati|advanced micro devices)' | head -1 | sed 's/.*: //')
+            GPU_NAME=$(lspci 2>/dev/null | grep -iE '(vga|3d|display).*(amd|\bati\b|advanced micro devices)' | head -1 | sed 's/.*: //')
         fi
     fi
     # SMI fallbacks — useful when lspci is missing (some containers) or
