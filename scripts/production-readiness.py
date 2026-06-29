@@ -156,6 +156,14 @@ def _gates(pytest_paths: Sequence[str]) -> dict[str, Gate]:
             required=False,
             available=_docker_compose_available,
             unavailable_reason="Docker Compose v2 is not available",
+            # This gate only validates YAML structure, not runtime config, so
+            # it runs with no .env present. Supply placeholders for the
+            # required (:?) interpolation vars so parsing succeeds — real users
+            # still get the :? error from `atlas init` / compose up if unset.
+            env={
+                "ATLAS_MODEL_FILE": "placeholder.gguf",
+                "ATLAS_MODEL_NAME": "placeholder",
+            },
         ),
         "workflow-yaml": Gate(
             "workflow-yaml",
