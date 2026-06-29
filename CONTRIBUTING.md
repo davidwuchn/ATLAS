@@ -210,6 +210,12 @@ pytest tests/ --cov=. --cov-report=html
 - Name test files `test_*.py`
 - Use descriptive test function names
 - Test edge cases and error conditions
+- Keep tests hermetic: never depend on a repo-root `.env`. CI runs on a
+  clean checkout with no `.env`, so a test that reads it (directly, or by
+  shelling out to a script that does) passes locally and fails in CI. Create
+  your own `tmp_path / ".env"` or pass values via the subprocess environment.
+  The `tests/cli/` suite moves any local `.env` aside so local runs match CI;
+  to mimic that elsewhere, run with `.env` temporarily renamed.
 
 ```python
 def test_chunk_overlap_preserves_context():
