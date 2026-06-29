@@ -40,6 +40,22 @@ func sized(width, height int) tuiModel {
 	return updated.(tuiModel)
 }
 
+func TestConfiguredContextTokensUsesPerSlotRuntimeConfig(t *testing.T) {
+	t.Setenv("ATLAS_CTX_SIZE", "131072")
+	t.Setenv("ATLAS_PARALLEL_SLOTS", "4")
+	if got := configuredContextTokens(); got != 32768 {
+		t.Fatalf("configuredContextTokens() = %d, want 32768", got)
+	}
+}
+
+func TestConfiguredContextTokensHasModelNeutralFallback(t *testing.T) {
+	t.Setenv("ATLAS_CTX_SIZE", "")
+	t.Setenv("ATLAS_PARALLEL_SLOTS", "")
+	if got := configuredContextTokens(); got != 32768 {
+		t.Fatalf("configuredContextTokens() = %d, want neutral fallback 32768", got)
+	}
+}
+
 func TestEmptyEnterDoesNothing(t *testing.T) {
 	m := sized(80, 30)
 	updated, _ := m.Update(keyMsg("enter"))

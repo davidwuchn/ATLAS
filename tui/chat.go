@@ -49,7 +49,7 @@ type agentRequest struct {
 	Mode              string           `json:"mode"`       // "default" | "accept-edits" | "yolo"
 	SessionID         string           `json:"session_id"` // PC-062: required so /cancel can target this turn
 	History           []historyMessage `json:"history,omitempty"`
-	BypassV3          bool             `json:"bypass_v3,omitempty"`          // /demo raw-pane flag — proxy short-circuits V3 calls
+	BypassV3          bool             `json:"bypass_v3,omitempty"`          // /demo baseline flag — proxy disables V3 orchestration
 	DisableFreshSlot  bool             `json:"disable_fresh_slot,omitempty"` // /demo flag — skip PC-045 so pre-warm survives
 	SandboxSubdir     string           `json:"sandbox_subdir,omitempty"`     // /demo flag — write files into this subdir of the workspace
 }
@@ -181,7 +181,7 @@ type demoOpts struct {
 }
 
 // sendChatOpts is sendChat with the demo flags exposed; used by the
-// /demo split-pane to drive a raw-9B session next to the V3 one
+// /demo split-pane to drive a base-agent session next to the V3 one
 // against the same proxy (bypassV3), keep PC-045 from wiping the
 // pre-warmed prefix cache (disableFreshSlot), and write files into
 // per-side sandbox subdirs so the two panes never clobber each other

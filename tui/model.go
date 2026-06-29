@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -134,8 +135,8 @@ type tuiModel struct {
 	lastUserMsg  string
 
 	// Token accounting from llm_call_end events. lastTurnTokens is the
-	// usage reported on the most recent LLM call (Qwen3.5 reports the
-	// FULL prompt+completion total, not a delta — that's the value we
+	// usage reported on the most recent LLM call. llama-server reports the
+	// full prompt+completion total, not a delta — that's the value we
 	// compare against maxContextTokens to gauge "how full is the
 	// window"). totalTokensSession sums per-call deltas across the
 	// whole session, used for the "tokens used overall" indicator.
@@ -151,8 +152,8 @@ type tuiModel struct {
 	streamingLLM       bool
 	streamingLLMText   string
 	streamingLLMHeader string
-	// May 10 2026: reasoning_token events stream the model's thought
-	// process (Qwen3.5 reasoning_content) separately from llm_token
+	// reasoning_token events stream a reasoning-capable model's thought
+	// process separately from llm_token
 	// content. We accumulate into a parallel buffer and render it
 	// inline with the streaming row so users can see what the model
 	// is thinking before it commits to a tool call. Cleared with
@@ -354,7 +355,7 @@ func newTUIModel(proxyURL string) tuiModel {
 		chatRenderer:     renderer,
 		workingDir:       wd,
 		mode:             "default",
-		maxContextTokens: 32768, // Qwen3.5-9B context size; matches llama-server config
+		maxContextTokens: configuredContextTokens(),
 		// File scan is dispatched async from Init() — see scanFilesCmd.
 		// Doing it synchronously here blocked tea.NewProgram from
 		// entering its event loop, during which the user's keystrokes
@@ -365,6 +366,28 @@ func newTUIModel(proxyURL string) tuiModel {
 		modifiedFiles: map[string]bool{},
 		lastFileScan:  time.Time{},
 	}
+}
+
+// configuredContextTokens returns the per-slot context available to one TUI
+// turn. Runtime sizing is model/hardware data written by `atlas tier fit`; the
+// UI must not infer context from a model family or parameter count.
+func configuredContextTokens() int {
+	total := 32768 // neutral fallback when launched outside the ATLAS wrapper
+	if raw := os.Getenv("ATLAS_CTX_SIZE"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			total = n
+		}
+	}
+	slots := 1
+	if raw := os.Getenv("ATLAS_PARALLEL_SLOTS"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			slots = n
+		}
+	}
+	if perSlot := total / slots; perSlot > 0 {
+		return perSlot
+	}
+	return total
 }
 
 // scanFilesMsg carries the result of an async file scan back to the
@@ -1200,7 +1223,7 @@ func (m *tuiModel) appendChatEvent(ev chatEvent) {
 		}
 
 	case "reasoning_token":
-		// May 10 2026: Qwen3.5 reasoning_content streamed alongside
+		// reasoning_content may stream alongside
 		// content. Accumulate into a parallel buffer and re-render the
 		// streaming row with a "‹thinking›" prefix so the user can see
 		// the model's thought process. Distinct from llm_token because
@@ -1249,7 +1272,7 @@ func (m *tuiModel) appendChatEvent(ev chatEvent) {
 		m.streamingLLMText = ""
 		m.streamingReasoningText = ""
 		m.streamingLLMHeader = ""
-		// Track tokens for the stats line. Qwen3.5's usage.total_tokens
+		// Track tokens for the stats line. llama-server's usage.total_tokens
 		// is "prompt + completion of *this* call", which is the right
 		// value for "context window utilization". The session-wide sum
 		// comes from the proxy's running ctx.TotalTokens (==accumulated
@@ -1612,9 +1635,9 @@ func formatV3StageEvent(eventType string, data json.RawMessage) string {
 		Slots     int     `json:"slots"`
 		Tier      string  `json:"tier"`
 		Strategy  string  `json:"strategy"`
-		Iterations int    `json:"iterations"`
-		Tokens    int     `json:"tokens"`
-		Failing   int     `json:"failing"`
+		Iterations int     `json:"iterations"`
+		Tokens     int     `json:"tokens"`
+		Failing    int     `json:"failing"`
 	}
 	_ = json.Unmarshal(data, &p)
 	if p.Detail == "" && p.Stage == "" {

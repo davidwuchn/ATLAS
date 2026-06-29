@@ -74,7 +74,7 @@ atlas-proxy-v2                          # listens on :8090
 | ATLAS_SANDBOX_URL | http://localhost:30820 | Code execution sandbox |
 | ATLAS_V3_URL | http://localhost:8070 | V3 pipeline service |
 | ATLAS_PROXY_PORT | 8090 | Proxy listen port |
-| ATLAS_MODEL_NAME | Qwen3.5-9B-Q6_K | Model name for llama-server |
+| ATLAS_MODEL_NAME | local-model | Neutral fallback request identifier; normal installs set the selected model |
 | ATLAS_WORKSPACE_DIR | (cwd) | Workspace root for read/write tools |
 
 ## Build

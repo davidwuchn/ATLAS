@@ -23,11 +23,11 @@
 
 ATLAS is a local coding agent for open models. It runs on your own hardware and works inside real repositories: reading files, editing code, running commands, and checking the result in an isolated sandbox.
 
-Loading a model locally is only half the problem. Getting a 9B model to stay on task across a real code change is harder. ATLAS puts an agent loop around the model that can plan, generate alternatives, enforce tool calls, run tests, and repair failures. Simple edits take the short path; harder tasks get more compute and verification.
+Loading a model locally is only half the problem. Getting a compact open model to stay on task across a real code change is harder. ATLAS puts an agent loop around the model that can plan, generate alternatives, enforce tool calls, run tests, and repair failures. Simple edits take the short path; harder tasks get more compute and verification.
 
-The default setup uses Qwen3.5-9B, but ATLAS is not tied to it. You can bring another GGUF model and build the matching Lens and ASA artifacts locally. There is no hosted API or per-token bill, and your source code and prompts stay on the machine running ATLAS.
+`atlas init` selects a compatible registry model for the machine, or you can bring another GGUF and build the matching Lens and ASA artifacts locally. Model identity and context sizing are runtime configuration, not baked-in family assumptions. There is no hosted API or per-token bill, and your source code and prompts stay on the machine running ATLAS.
 
-The published 74.6% LiveCodeBench result belongs to the frozen 14B reference build, not the default 9B model. Formal 9B benchmarks are still in progress.
+The published 74.6% LiveCodeBench result belongs to the frozen 14B reference build. Formal results for the current registry models are still in progress.
 
 ---
 
@@ -80,7 +80,7 @@ The published 74.6% LiveCodeBench result belongs to the frozen 14B reference bui
    - [Derivation Chains](docs/reports/V3_ABLATION_STUDY.md#derivation-chains-0-rescues) - multi-step reasoning for harder problems
 
 4. **[Geometric Lens](docs/ARCHITECTURE.md#5-geometric-lens)** - energy-based scoring over the model's own embeddings, no external oracle. ([What is a "Geometric Lens"?](docs/ARCHITECTURE.md#why-geometric-lens))
-   - [C(x) Cost Field](docs/ARCHITECTURE.md#scoring-models) - 4096→512→128→1 MLP that scores candidate quality
+   - [C(x) Cost Field](docs/ARCHITECTURE.md#scoring-models) - model-hidden-dim→512→128→1 MLP that scores candidate quality
    - [G(x) Quality Prediction](docs/ARCHITECTURE.md#scoring-models) - XGBoost ensemble used for selection
    - [RAG / PageIndex V2](docs/ARCHITECTURE.md#rag--pageindex-v2) - AST-aware code retrieval and project indexing
    - [Confidence Router](docs/ARCHITECTURE.md#confidence-router--pattern-cache) - Thompson Sampling routes compute to the candidates that need it
@@ -125,8 +125,8 @@ Apple Silicon runs natively through the macOS hybrid Metal path (native llama-se
 ## ⚠️ Known Limitations
 
 - **Linux Docker stack, plus a native macOS path.** NVIDIA, AMD ROCm, and Vulkan Docker paths ship today; Apple Silicon runs via the native macOS hybrid Metal path ([#32](https://github.com/itigges22/ATLAS/issues/32)). Intel Arc / SYCL is on the roadmap.
-- **9B model is not formally benchmarked yet.** ATLAS ships Qwen3.5-9B with the full V3 pipeline, but the canonical 74.6% LiveCodeBench score is from the 14B reference build. Formal 9B numbers are tracked in [#28](https://github.com/itigges22/ATLAS/issues/28). The 14B methodology and ablations live in [`docs/reports/V3_ABLATION_STUDY.md`](docs/reports/V3_ABLATION_STUDY.md); raw traces are on [HuggingFace](https://huggingface.co/datasets/itigges22/ATLAS).
-- **Complex feature additions can be inconsistent.** The model sometimes spends agent turns exploring an unfamiliar codebase before writing code. Reliability has improved markedly on the 9B build through the V3.1.2 agent-reliability pass; a fresh formal number is tracked in [#28](https://github.com/itigges22/ATLAS/issues/28).
+- **Current registry models are not formally benchmarked yet.** The canonical 74.6% LiveCodeBench score is from the frozen 14B reference build. New model-specific numbers are tracked in [#28](https://github.com/itigges22/ATLAS/issues/28). The reference methodology and ablations live in [`docs/reports/V3_ABLATION_STUDY.md`](docs/reports/V3_ABLATION_STUDY.md); raw traces are on [HuggingFace](https://huggingface.co/datasets/itigges22/ATLAS).
+- **Complex feature additions can be inconsistent.** Compact models sometimes spend agent turns exploring an unfamiliar codebase before writing code. Reliability has improved through the V3.1.2 agent-reliability pass; fresh model-specific numbers are tracked in [#28](https://github.com/itigges22/ATLAS/issues/28).
 - **Grammar-constrained decoding is slow.** Around 51 tok/s on llama-server.
 
 ---
@@ -135,7 +135,7 @@ Apple Silicon runs natively through the macOS hybrid Metal path (native llama-se
 
 **V3.1.2 "Maia"** - Current release. Broader hardware reach, bring-your-own-model training, and an agent-reliability pass on top of the V3.1.0 base (TUI, one-command install, streaming Lens + ASA).
 - Hardware reach: AMD ROCm via llama.cpp incl. RDNA4 / RX 9070 (gfx1200/gfx1201) ([#26](https://github.com/itigges22/ATLAS/issues/26)); Apple Silicon native macOS hybrid Metal path ([#32](https://github.com/itigges22/ATLAS/issues/32), see [SETUP_MACOS.md](docs/SETUP_MACOS.md)); Vulkan universal fallback covering AMD / Intel / Snapdragon / Apple-via-MoltenVK / CPU ([#114](https://github.com/itigges22/ATLAS/issues/114)).
-- Bring-your-own-model: local Lens training pipeline (`atlas lens build` / `retrain`, [#100](https://github.com/itigges22/ATLAS/issues/100)) and ASA per-model calibration parity (`atlas asa check/build/publish`, [#113](https://github.com/itigges22/ATLAS/issues/113)) — train Lens + ASA artifacts for non-default GGUFs, with per-model operating thresholds that ship with the lens.
+- Bring-your-own-model: local Lens training pipeline (`atlas lens build` / `retrain`, [#100](https://github.com/itigges22/ATLAS/issues/100)) and ASA per-model calibration parity (`atlas asa check/build/publish`, [#113](https://github.com/itigges22/ATLAS/issues/113)) — train Lens + ASA artifacts for additional GGUFs, with per-model operating thresholds that ship with the lens.
 - In-the-loop lens training: rate passes in the TUI (`/good` · `/bad` · `/review` · `/deny`) → collected, weighted samples → `atlas lens retrain` on your own workloads.
 - Agent reliability: tool-result visibility fix, read-dedup, traceback → directed-edit, `move_file`, pip-install / case-mismatch steers, sandbox shell policy + host-sized cgroup limits.
 - Structural call-graph reasoning ([#39](https://github.com/itigges22/ATLAS/issues/39) / [#125](https://github.com/itigges22/ATLAS/pull/125), thanks [@yogthos](https://github.com/yogthos)); ARCHITECTURE.md translated to zh-CN / ja / ko ([#25](https://github.com/itigges22/ATLAS/issues/25)).
@@ -144,7 +144,7 @@ Apple Silicon runs natively through the macOS hybrid Metal path (native llama-se
 - Architecture-first planning phase — RPG-style plan-then-fill: plan at module scope, then implement at function scope ([#120](https://github.com/itigges22/ATLAS/issues/120), PR [#124](https://github.com/itigges22/ATLAS/pull/124)).
 - Structural code reasoning (tail) — solver-backed reachability + syntax-agnostic wavelet decomposition for multi-resolution "which files matter" retrieval ([#39](https://github.com/itigges22/ATLAS/issues/39)).
 - Reasoning with sampling — efficiency and quality gains ([#9](https://github.com/itigges22/ATLAS/issues/9)).
-- Deferred infra: automated HuggingFace submission pipeline ([#102](https://github.com/itigges22/ATLAS/issues/102)); ROCm on K3s / Kubernetes; formal 9B benchmarks — LiveCodeBench, GPQA Diamond, SciCode ([#28](https://github.com/itigges22/ATLAS/issues/28)).
+- Deferred infra: automated HuggingFace submission pipeline ([#102](https://github.com/itigges22/ATLAS/issues/102)); ROCm on K3s / Kubernetes; formal registry-model benchmarks — LiveCodeBench, GPQA Diamond, SciCode ([#28](https://github.com/itigges22/ATLAS/issues/28)).
 
 **Backlog / help wanted**
 - Hardware: ARM64 multi-arch builds ([#115](https://github.com/itigges22/ATLAS/issues/115)), multi-GPU for larger models ([#34](https://github.com/itigges22/ATLAS/issues/34)), Intel oneAPI / SYCL ([#27](https://github.com/itigges22/ATLAS/issues/27)).

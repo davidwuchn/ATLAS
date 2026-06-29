@@ -90,15 +90,15 @@ Every event has the shape `{"type":"<name>","data":{...}}`. Types in emission or
 | `v3_sandbox` | Per-candidate sandbox test (`sandbox_test`, `sandbox_pass`, `sandbox_fail`, `sandbox_done`) | `stage`, `detail`, `index` (int), `elapsed_ms` (int), `energy` (float, on `_pass`), `stderr` (string, first 120 chars on `_fail`), `passed` / `total` (on `_done`) |
 | `v3_select` | Candidate selection (`s_star`, `s_star_winner`, `selected`) | `stage`, `detail`, `index` (int), `energy` (float) |
 | `v3_lens_per_step` | PC-207 wiring: per-token C(x)+G(x) scoring of each candidate via `/internal/lens/score-per-step`. Fires once per candidate after generation (PlanSearch + DivSampling paths). Lets the TUI surface WHERE a candidate's quality cratered, and gives downstream candidate-selection logic a per-step signal beyond the single `energy` scalar. | `stage`, `detail`, `index` (int, candidate index), `source` (`plansearch`\|`divsampling`), `first_off_rails_idx` (int, -1 if none), `gx_score_min` (float), `gx_score_mean` (float), `cx_norm_max` (float), `n_tokens` (int) |
-| `v3_lens_veto` | PC-207 alignment: V3 hard-rejected a sandbox-passing candidate because its `gx_min` sat below the severe-quality threshold (0.05). Sandbox proves execution; lens proves the model's internal state didn't collapse to a stub. Without this veto a 10-line `<h1>Page</h1>` stub passes sandbox and rubber-stamps a bad write. Fires per-vetoed-candidate, before selection. | `stage`, `detail`, `index` (int, candidate index), `gx_score_min` (float), `first_off_rails_idx` (int, -1 if none) |
+| `v3_lens_veto` | PC-207 alignment: V3 hard-rejected a sandbox-passing candidate because its `gx_min` sat below the selected model artifact's calibrated severe-quality threshold. Sandbox proves execution; lens checks that the model's internal state did not collapse to a stub. Disabled when the Lens is uncalibrated. | `stage`, `detail`, `index` (int, candidate index), `gx_score_min` (float), `first_off_rails_idx` (int, -1 if none) |
 | `v3_structural_veto` | GH #39 point 1: V3 hard-rejected a sandbox-passing candidate because tree-sitter found one or more direct-identifier calls that don't resolve to a local def, import, builtin, or project symbol. Sandbox can pass for code with try/except ImportError fallbacks or dead branches; structural verification doesn't care whether the unresolved call actually executes, only that it can't resolve. Fires per-vetoed-candidate, after `v3_lens_veto`, before selection. | `stage`, `detail`, `index` (int, candidate index), `n_unresolved` (int), `unresolved_calls` (string[], up to 5), `n_calls_total` (int) |
 | `v3_call_chain_context` | GH #39 point 3: V3's phase-3 repair built a call-chain context block for the failing function (parsed from the deepest non-`<module>` frame in the candidate's stderr) and is about to inject it into PR-CoT, refinement-loop, and derivation-chain prompts. Informational, not a veto. Fires once per phase-3 entry, only when the failing function is actually defined in `file_map`. | `stage`, `detail`, `function` (string — the failing function name) |
 | `symbol_index_injected` | GH #39 point 4: before the first LLM call, the proxy auto-injects function/class snippets for symbols referenced in the user message (via `/internal/symbol_index`). This event fires once per turn-zero, listing what got injected so the TUI can show "pre-loaded 3 snippets" instead of an opaque burst of context. | `matched` (string[] — matched symbol names), `n_files` (int — project files scanned), `skipped` (int — symbols that didn't resolve) |
 | `agent_lens_score` | PC-207 agent-loop integration: lens scored a `write_file` or `edit_file` tool call's content via `/internal/lens/score-per-step`. Fires per write/edit before tool execution. The score reflects the model's output quality (independent of whether the tool succeeds). Used by the proxy to detect stuck/repetitive patterns (see `agent_lens_intervention`). | `tool` (`write_file`\|`edit_file`), `turn` (int), `n_tokens` (int), `first_off_rails_idx` (int, -1 if none), `gx_score_min` (float), `gx_score_mean` (float), `latency_ms` (float) |
-| `agent_lens_intervention` | PC-207 agent-loop integration: lens detected ≥2 consecutive `write_file`/`edit_file` responses with `gx_score_min` below the low-quality threshold (0.15). The proxy queues a corrective system message that the next LLM call will see, breaking the model out of stuck patterns (the May 6 `templates/resources.html` stub-loop signature). | `turn` (int), `tool` (string), `reason` (string — the multi-sentence corrective injected into ctx.Messages) |
+| `agent_lens_intervention` | PC-207 agent-loop integration: lens detected consecutive low-quality writes using the selected model artifact's calibrated `low`/`severe` thresholds. The proxy queues a corrective system message for the next LLM call. Disabled when calibration is absent. | `turn` (int), `tool` (string), `reason` (string — the multi-sentence corrective injected into ctx.Messages) |
 | `agent_repeat_intervention` | Tool-call repetition detector (`proxy/tool_repeat.go`): proxy saw the model emit the same `(tool_name, args)` signature ≥3 times in the last 8 turns and queued a corrective for the next LLM call. Sibling to `agent_lens_intervention` — the lens covers semantic repetition in `write_file`/`edit_file` content; this covers structural repetition (e.g. `read_file('app.py')` 4 times in 6 turns, `run_command('curl …')` after the same error) for any tool. | `turn` (int), `tool` (string), `reason` (string — the corrective injected into ctx.Messages) |
 | `agent_reasoning_intervention` | Reasoning-repetition detector (`proxy/reasoning_repeat.go`, May 10 2026 BiasBusters #30). Proxy saw the model's `reasoning_content` stream open with the same normalized prefix for ≥3 consecutive turns ("Now I need to look at the file" / similar) and queued a corrective. Third pillar alongside `agent_lens_intervention` (content quality) and `agent_repeat_intervention` (call-shape repetition) — this catches the case where THINKING is stuck even when content/calls vary. | `turn` (int), `consecutive` (int — how many turns the snippet repeated), `snippet` (string — the normalized opening that triggered), `reason` (string — corrective injected into ctx.Messages) |
-| `reasoning_token` | One delta from the model's `reasoning_content` stream during SSE chat completion (Qwen3.5 hybrid reasoning). May 10 2026: previously these tokens were silently buffered for the empty-content fallback only; now they're forwarded to the TUI for live display so users can see the model's thought process. Distinct from `llm_token` (which carries the JSON tool-call content destined for parse). | `text` (string — single delta of reasoning prose) |
+| `reasoning_token` | One delta from a model's optional `reasoning_content` stream during SSE chat completion. These tokens are forwarded to the TUI for live display. Distinct from `llm_token` (which carries the JSON tool-call content destined for parse). | `text` (string — single delta of reasoning prose) |
 | `v3_repair` | Phase 3 repair strategy (`phase3`, `pr_cot*`, `refinement*`, `derivation*`, `fallback`) | `stage`, `detail`, `strategy` (string: `pr_cot` / `refinement` / `derivation`), `failing` (int), `iterations` (int, on `refinement_pass`), `tokens` (int, on `_pass`) |
 | `v3_probe` | Probe phase events (`probe`, `probe_light`, `probe_retry`, `probe_failed`, `probe_scored`, `probe_sandbox`, `probe_pass`) | `stage`, `detail` |
 | `v3_self_test` | Self-test generation/verify events (`self_test_gen`, `self_test_done`, `self_test_error`, `self_test_skip`, `self_test_verify`) | `stage`, `detail` |
@@ -251,7 +251,7 @@ OpenAI-compatible chat completions. Predates `/v1/agent` and is kept for SDK com
 **Request:**
 ```json
 {
-  "model": "Qwen3.5-9B-Q6_K",
+  "model": "local-model",
   "messages": [
     {"role": "user", "content": "Create a Python hello world script"}
   ],
@@ -273,7 +273,7 @@ data: [DONE]
 {
   "id": "atlas-verify",
   "object": "chat.completion",
-  "model": "Qwen3.5-9B-Q6_K",
+  "model": "local-model",
   "choices": [{"index": 0, "message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}],
   "usage": {"prompt_tokens": 150, "completion_tokens": 200, "total_tokens": 350},
   "atlas_route": "standard",
@@ -870,8 +870,8 @@ OpenAI-compatible chat completions with `response_format` support for grammar-co
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3.5-9B-Q6_K",
-    "messages": [{"role":"user","content":"/nothink\nSay hello"}],
+    "model": "local-model",
+    "messages": [{"role":"user","content":"Say hello"}],
     "max_tokens": 50,
     "response_format": {"type": "json_object"}
   }'

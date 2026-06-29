@@ -13,25 +13,29 @@ Algorithm (matches the Feb 2026 ASA paper, arxiv 2602.04935):
   5. Write as a GGUF control vector that llama-server's
      --control-vector-scaled flag consumes.
 
-Layer choice: ~75% of model depth (BiasBusters practitioner guidance).
-Qwen3.5-9B has 36 layers; layer 27 is the default. Override via --layer.
+Layer choice: ~75% of the selected model's depth (BiasBusters practitioner
+guidance). `atlas asa build` derives it from the loaded model; direct callers
+must pass `--layer`.
 
 Run inside the atlas-geometric-lens container so it can reach the
 PC-202 hidden-states endpoint via the same network the lens uses:
     docker exec -i atlas-geometric-lens-1 python3 \\
         /workspace_calib/build_steering_vector.py \\
         --pairs /workspace_calib/contrast_pairs.jsonl \\
-        --out /workspace_calib/ast_edit_steering.gguf
+        --out /workspace_calib/ast_edit_steering.gguf \\
+        --layer <75%-of-model-depth>
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import sys
 import time
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import numpy as np
 
@@ -39,23 +43,48 @@ sys.path.insert(0, "/app")
 from geometric_lens.embedding_extractor import extract_per_layer_per_token
 
 
-QWEN_PROMPT_TEMPLATE = (
-    "<|im_start|>system\n"
-    "You are ATLAS, a coding assistant. Choose the right tool for the job.\n"
-    "<|im_end|>\n"
-    "<|im_start|>user\n"
-    "{user}\n"
-    "<|im_end|>\n"
-    "<|im_start|>assistant\n"
-    "{assistant_prefix}"
+_SYSTEM_PROMPT = (
+    "You are ATLAS, a coding assistant. Choose the right tool for the job."
 )
 
 
-def render_prompt(pair: dict) -> str:
-    return QWEN_PROMPT_TEMPLATE.format(
-        user=pair["user"],
-        assistant_prefix=pair["assistant_prefix"],
+def _llama_url() -> str:
+    return os.environ.get(
+        "LLAMA_EMBED_URL",
+        os.environ.get("LLAMA_URL", "http://llama-server:8080"),
+    ).rstrip("/")
+
+
+@functools.lru_cache(maxsize=2048)
+def _render_user_context(user: str) -> str:
+    """Render system+user messages with the loaded model's own template."""
+    payload = json.dumps({
+        "messages": [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ],
+    }).encode()
+    req = Request(
+        f"{_llama_url()}/apply-template",
+        data=payload,
+        headers={"Content-Type": "application/json"},
     )
+    try:
+        with urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+    except Exception as exc:
+        raise RuntimeError(
+            "llama-server /apply-template is required for model-agnostic "
+            f"ASA calibration: {exc}"
+        ) from exc
+    prompt = result.get("prompt") if isinstance(result, dict) else None
+    if not isinstance(prompt, str) or not prompt:
+        raise RuntimeError("unexpected llama-server /apply-template response")
+    return prompt
+
+
+def render_prompt(pair: dict) -> str:
+    return _render_user_context(pair["user"]) + pair["assistant_prefix"]
 
 
 def extract_mean_residual(prompt: str, layer: int) -> np.ndarray:
@@ -108,8 +137,9 @@ def main() -> int:
                     help="contrast_pairs.jsonl — paired ast_edit/edit_file prompts")
     ap.add_argument("--out", required=True, type=Path,
                     help="output GGUF control vector path")
-    ap.add_argument("--layer", type=int, default=27,
-                    help="layer to extract residuals from (default 27 = ~75%% of Qwen3.5-9B's 36 layers)")
+    ap.add_argument("--layer", type=int, required=True,
+                    help="layer to extract residuals from; use ~75%% of the "
+                         "selected model's layer count")
     ap.add_argument("--limit", type=int, default=0,
                     help="cap pairs processed (0 = all). Useful for smoke tests.")
     ap.add_argument("--model-hint", default="unknown",

@@ -205,7 +205,7 @@ type EditFileOutput struct {
 // (function, class, HTML element) with new content. The selector grammar is
 // per-language and intentionally narrow in v1 to avoid the model
 // hallucinating raw tree-sitter s-expressions (42% intended-match measured
-// on Qwen3.5-9B-Q6_K, May 8 — see GH #39 open design questions).
+// on the then-reference local model, May 8 — see GH #39 open design questions).
 //
 //   Selectors v1:
 //     python: function:NAME, class:NAME (decorator-aware: replaces
@@ -427,12 +427,12 @@ type AgentContext struct {
 	LensURL      string
 	V3URL        string
 
-	// BypassV3 short-circuits every V3 pipeline call in this request's
-	// lifecycle (writeFileWithV3 / improveContentWithV3). The agent loop,
-	// tool surface, grammar, and guardrails still run; only the V3
-	// orchestration layer is skipped, so the model's first-pass output is
-	// what hits disk. Used by `/demo` split-pane to render a raw 9B
-	// session next to a V3-orchestrated session against the same proxy.
+	// BypassV3 short-circuits the V3 layer for this request: pre-flight
+	// plan generation, the orchestration-only plan_tasks tool, and the
+	// write/edit candidate pipelines. The base file/tool agent and its
+	// guardrails still run so /demo can compare executable outputs from
+	// the same model without falsely presenting the left side as a bare
+	// chat completion.
 	BypassV3 bool
 
 	// DisableFreshSlot skips the PC-045 slot-erase at the start of the
@@ -486,7 +486,7 @@ type AgentContext struct {
 
 	// PC-207 agent-loop integration: rolling list of gx_score_min values
 	// from lens scoring of write_file/edit_file tool calls. When the
-	// recent N values all fall below lensLowScoreThreshold the loop
+	// recent N values all fall below the selected model's calibrated threshold the loop
 	// injects a corrective system message before the next LLM call.
 	// See proxy/lens_score.go for the pattern detection.
 	LensScoreHistory []float64

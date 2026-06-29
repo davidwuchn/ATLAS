@@ -35,7 +35,7 @@ var (
 	lensURL      = envOr("ATLAS_LENS_URL", "http://localhost:8099")
 	sandboxURL   = envOr("ATLAS_SANDBOX_URL", "http://localhost:30820")
 	proxyPort    = envOr("ATLAS_PROXY_PORT", "8090")
-	modelName    = envOr("ATLAS_MODEL_NAME", "Qwen3.5-9B-Q6_K")
+	modelName    = envOr("ATLAS_MODEL_NAME", "local-model")
 	healthClient = &http.Client{Timeout: 3 * time.Second}
 )
 
@@ -134,10 +134,36 @@ type LensScore struct {
 // ---------------------------------------------------------------------------
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
+	// Prefer llama-server's loaded model over our configured fallback. This
+	// keeps the API (and /demo title) truthful when a local launch overrides
+	// ATLAS_MODEL_NAME or the local .env lags behind the running server.
+	id := modelName
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		strings.TrimRight(inferenceURL, "/")+"/v1/models", nil)
+	if err == nil {
+		if upstream, upstreamErr := healthClient.Do(upstreamReq); upstreamErr == nil {
+			defer upstream.Body.Close()
+			if upstream.StatusCode == http.StatusOK {
+				var loaded struct {
+					Data []struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				}
+				if decodeErr := json.NewDecoder(io.LimitReader(upstream.Body, 1<<20)).Decode(&loaded); decodeErr == nil {
+					for _, candidate := range loaded.Data {
+						if candidate.ID = strings.TrimSpace(candidate.ID); candidate.ID != "" {
+							id = candidate.ID
+							break
+						}
+					}
+				}
+			}
+		}
+	}
 	resp := map[string]any{
 		"object": "list",
 		"data": []map[string]any{
-			{"id": "atlas", "object": "model", "owned_by": "atlas"},
+			{"id": id, "object": "model", "owned_by": "atlas"},
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")

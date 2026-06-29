@@ -26,7 +26,7 @@ PARALLEL="${PARALLEL_SLOTS:-2}"
 DRAFT_MODEL="${DRAFT_MODEL:-/models/Qwen3-0.6B-Q8_0.gguf}"
 
 # Backend-specific runtime tuning (V3.1.1 multi-backend). Mirrors the
-# block in entrypoint-v3.1-9b.sh; speculative decoding is currently
+# block in entrypoint-v3.1.sh; speculative decoding is currently
 # untested on ROCm — the draft-model path may need additional tuning.
 ATLAS_BACKEND="${ATLAS_BACKEND:-cuda}"
 case "$ATLAS_BACKEND" in

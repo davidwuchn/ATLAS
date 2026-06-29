@@ -7,7 +7,7 @@
 // reviewers don't have to chase three call sites to know what we
 // reject.
 //
-// Background: ATLAS runs against a local qwen-coder model that's
+// Background: ATLAS runs against compact local coding models that are
 // weaker than the API frontier models. Claude-Code-style "trust the
 // model + permission prompts" doesn't hold for us; the model will
 // reliably emit markdown-fenced code with prose preamble and reach
@@ -243,7 +243,7 @@ var workspaceRefRe = regexp.MustCompile(`(^|[^a-zA-Z0-9_])/workspace(/|\s|$|[^a-
 // validateWorkingDirReference rejects shell commands that reference
 // `/workspace` when /workspace is not the project's working directory.
 //
-// Qwen3.5 has a stubborn training-data prior toward `/workspace` as a
+// Coding models often have a training-data prior toward `/workspace` as a
 // generic project sandbox path — coding-assistant fine-tunes use it
 // heavily. The system prompt explicitly warns against absolute paths
 // but the prior leaks through under conversation pressure. May 8 2026
@@ -294,7 +294,7 @@ func validateRunCommand(cmd, workingDir string) string {
 // <html>-element rewrite of a 120B file; the on-disk result was a
 // destroyed file passed off as a successful "done". The model usually
 // produces this shape when its response stops mid-output (json_object
-// grammar + /nothink + length bias all converging on minimal valid
+// grammar + length bias converging on minimal valid
 // JSON) — the parser sees a syntactically clean tool_call with empty
 // content, no truncation marker fires, the recovery path doesn't
 // engage, and the destructive write lands.

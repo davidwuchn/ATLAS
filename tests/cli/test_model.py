@@ -84,6 +84,7 @@ def test_list_json_structure(tmp_path, capsys):
     assert len(payload["models"]) == 7
     nine = next(m for m in payload["models"] if m["name"] == "Qwen3.5-9B-Q6_K")
     assert nine["lens_status"] == "supported"
+    assert nine["lens_calibrated"] is False
     assert nine["installed"] is False
     assert nine["installed_size_gb"] is None
     assert nine["download_url"].startswith("https://huggingface.co/")
@@ -108,6 +109,7 @@ def test_recommend_on_medium_tier_returns_supported(monkeypatch, capsys):
     assert "Detected tier: medium" in out
     assert "Qwen3.5-9B-Q6_K" in out
     assert "Lens supported" in out
+    assert "Calibration required" in out
 
 
 def test_recommend_on_xlarge_surfaces_fallback_to_9b(monkeypatch, capsys):
@@ -855,6 +857,8 @@ def test_install_artifacts_uses_url_base_plus_filename(tmp_path, monkeypatch):
     assert (lens_dir / "cost_field.pt").is_file()
     assert (lens_dir / "metric_tensor.pt").is_file()
     assert (tmp_path / "ast_edit_steering.gguf").is_file()
+    assert (tmp_path / "ast_edit_steering.gguf.model").read_text().strip() == \
+        "Qwen3.5-9B-Q6_K"
 
 
 def test_install_artifacts_skips_already_present_files(tmp_path, monkeypatch,
@@ -866,6 +870,9 @@ def test_install_artifacts_skips_already_present_files(tmp_path, monkeypatch,
     (lens_dir / "cost_field.pt").write_bytes(b"already here")
     (lens_dir / "metric_tensor.pt").write_bytes(b"already here")
     (tmp_path / "ast_edit_steering.gguf").write_bytes(b"already here")
+    (tmp_path / "ast_edit_steering.gguf.model").write_text(
+        "Qwen3.5-9B-Q6_K\n"
+    )
 
     monkeypatch.setenv("ATLAS_LENS_MODELS", str(lens_dir))
     captured: list = []
@@ -887,6 +894,24 @@ def test_install_artifacts_skips_already_present_files(tmp_path, monkeypatch,
     assert rc == 0
     assert len(captured) == 3  # all 3 re-fetched
     assert (lens_dir / "cost_field.pt").read_bytes() == b"NEW"
+
+
+def test_install_artifacts_replaces_cross_model_asa_vector(tmp_path,
+                                                            monkeypatch):
+    vector = tmp_path / "ast_edit_steering.gguf"
+    vector.write_bytes(b"wrong vector")
+    (tmp_path / "ast_edit_steering.gguf.model").write_text("other-model\n")
+    monkeypatch.setenv("ATLAS_LENS_MODELS", str(tmp_path / "lens"))
+    captured = []
+    _install_with_fake_urlopen(monkeypatch, body=b"selected vector", status=200,
+                                captured=captured)
+
+    rc = model.main(["install-artifacts", "Qwen3.5-9B-Q6_K",
+                     "--models-dir", str(tmp_path), "--no-color"])
+    assert rc == 0
+    assert vector.read_bytes() == b"selected vector"
+    assert (tmp_path / "ast_edit_steering.gguf.model").read_text().strip() == \
+        "Qwen3.5-9B-Q6_K"
 
 
 def test_install_no_artifacts_flag_skips_artifact_download(tmp_path, monkeypatch,

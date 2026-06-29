@@ -9,7 +9,7 @@ from typing import Optional, List, Tuple
 INFERENCE_URL = os.environ.get("ATLAS_INFERENCE_URL", "http://localhost:8080")
 RAG_API_URL = os.environ.get("ATLAS_RAG_URL", "http://localhost:8099")
 SANDBOX_URL = os.environ.get("ATLAS_SANDBOX_URL", "http://localhost:30820")
-MODEL_NAME = os.environ.get("ATLAS_MODEL_NAME", "Qwen3.5-9B-Q6_K")
+MODEL_NAME = os.environ.get("ATLAS_MODEL_NAME", "local-model")
 
 
 def _post(url: str, body: dict, timeout: int = 120) -> dict:

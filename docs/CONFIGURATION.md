@@ -1,18 +1,19 @@
 # ATLAS Configuration Reference
 
-Complete reference for all environment variables, command-line flags, and configuration files across every ATLAS service. All settings have sensible defaults — most users only need to edit `.env`.
+Complete reference for all environment variables, command-line flags, and configuration files across every ATLAS service. Hardware/runtime settings have safe defaults; model selection is explicit.
 
 ---
 
 ## Quick Start
 
 ```bash
-cp .env.example .env
-# Edit .env only if you need to change model path or ports
+atlas init                 # selects a registry model and writes .env
 docker compose up -d
 ```
 
-The defaults work if your model is at `./models/Qwen3.5-9B-Q6_K.gguf`.
+For a manual/BYO install, copy `.env.example` and set `ATLAS_MODEL_FILE` and
+`ATLAS_MODEL_NAME`. Compose intentionally fails when either is missing instead
+of silently choosing a model family.
 
 ---
 
@@ -23,8 +24,8 @@ These variables are read by `docker-compose.yml` and control host-side port mapp
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ATLAS_MODELS_DIR` | `./models` | Host path to directory containing GGUF model weights |
-| `ATLAS_MODEL_FILE` | `Qwen3.5-9B-Q6_K.gguf` | Model filename (must exist in ATLAS_MODELS_DIR) |
-| `ATLAS_MODEL_NAME` | `Qwen3.5-9B-Q6_K` | Model identifier used in API responses |
+| `ATLAS_MODEL_FILE` | **required** | Selected model filename (must exist in ATLAS_MODELS_DIR) |
+| `ATLAS_MODEL_NAME` | **required** | Selected model identifier; normally the filename without `.gguf` |
 | `ATLAS_CTX_SIZE` | `131072` | Context window size in tokens, TOTAL across all parallel slots (mapped to `CONTEXT_LENGTH` inside the llama container). Sized per model + GPU by `atlas tier fit --write`. |
 | `ATLAS_PARALLEL_SLOTS` | `4` | Concurrent request slots. llama-server divides `ATLAS_CTX_SIZE` by this for per-slot context. |
 | `ATLAS_MAX_TOKENS` | `8192` | Per-turn generation ceiling (`max_tokens`). An agent turn is a tool call or a whole-file `write_file` (a few thousand tokens); 8192 covers a ~600-line generation and bounds a content runaway to a couple minutes. Raise only for genuinely large single-file writes. |
@@ -77,9 +78,8 @@ stops at the one step only you can do (the rebuild); the manual flow is:
    file in yourself, or fetch it with `atlas model install --url <hf-url>`
    (downloads into the models dir; no SHA pin since it's unregistered).
 
-2. **Point `.env` at it** — set both keys, and leave a revert breadcrumb:
+2. **Point `.env` at it** — set both keys:
    ```dotenv
-   # Was: Qwen3.5-9B-Q6_K.gguf  (revert here to switch back)
    ATLAS_MODEL_FILE=your-model-Q4_K_M.gguf
    ATLAS_MODEL_NAME=your-model-Q4_K_M
    ```
@@ -124,8 +124,8 @@ stops at the one step only you can do (the rebuild); the manual flow is:
    > llama.cpp for a new model architecture".
 
 6. **Retrain the Geometric Lens for the new model.** The lens `C(x)` is
-   dimension-coupled to the model's hidden size, so the bundled (Qwen) weights
-   won't load against a different model. `atlas lens check` reports the mismatch.
+   dimension-coupled to the model's hidden size, so artifacts trained for one
+   model won't load against another. `atlas lens check` reports the mismatch.
    Build the new model's *own* candidates and retrain — all through the CLI.
    Connectivity (ports, model file) resolves automatically from your
    deployment's config (`.env` on Docker, `atlas.conf` on K3s):
@@ -138,36 +138,45 @@ stops at the one step only you can do (the rebuild); the manual flow is:
    #    model's artifacts (writes geometric-lens/geometric_lens/models/cost_field.pt)
    atlas lens build --force --from-results benchmark/results/mymodel_lens/v3_lcb/per_task
 
-   # 3. ASA control vector; N ≈ 75% of the model's layer count (48 → 36 for Gemma)
-   atlas asa build --layer N
+   # 3. ASA control vector; defaults to 75% of the loaded model's layer count
+   atlas asa build
    ```
    (The candidate sandbox executes locally via a `python3` subprocess — only
    llama-server + geometric-lens are network dependencies. For scripted use,
    `scripts/retrain_lens_from_results.py --results-dir <dir>` remains available
    and resolves its ports the same way.)
 
-   **Per-model operating thresholds.** The lens `G(x)` score scale is
-   model-specific — one model's grounded writes may cluster at 0.05, another's
-   at 0.45 — so a single hardcoded off-rails/regression cutoff fires for one
-   model and never for another. Each lens therefore carries its own thresholds
-   in `gx_thresholds.json` alongside the artifact:
+   **Per-model calibration.** The learned C(x) energy scale and G(x) score
+   distribution are model-specific. `atlas lens build` therefore writes
+   `model_identity.json` (the loaded model name and embedding dimension),
+   `cx_normalization.json` (sigmoid midpoint/steepness derived from this
+   model's PASS/FAIL energies) and `gx_thresholds.json` beside the weights.
+   One model's grounded G(x) writes may cluster at 0.05, another's
+   at 0.45, so a single hardcoded off-rails/regression cutoff fires for one
+   model and never for another. A threshold file looks like:
    ```json
-   { "off_rails": 0.30, "low": 0.15, "severe": 0.05 }
+   { "off_rails": 0.15, "low": 0.30, "severe": 0.05 }
    ```
    The lens service loads it per-model and returns the values in every score
    response; the proxy uses them for its run-of-N / severe regression checks.
    `off_rails` is the per-token "stop generating" cutoff; `low` is the
    aggregate `gx_min` that counts as a low-quality write (run-of-2 → corrective);
    `severe` is the single-write cutoff that intervenes immediately. **If the
-   file is absent the service falls back to those defaults** (Qwen-calibrated),
-   which is why a model whose scores sit higher (e.g. Gemma at 0.37–0.55) shows
-   no lens intervention until its own thresholds are calibrated. Calibrate them
-   from the same labeled candidates used in step 2 — pick cutoffs from the
-   `pass`/`fail` `gx_min` distributions (e.g. `severe` ≈ the 5th percentile of
-   `fail`, `low` ≈ where pass/fail separate) — and write `gx_thresholds.json`
+   file is absent or invalid, scores remain visible as uncalibrated telemetry
+   but threshold-based intervention is disabled.** ATLAS never borrows another
+   model's cutoffs. Calibrate them from the same labeled candidates used in
+   step 2. The build uses the 5th, 10th, and 20th percentiles of this model's
+   passing scores for `severe`, `off_rails`, and `low`, then writes
+   `gx_thresholds.json`
    into `geometric-lens/geometric_lens/models/`. It publishes/downloads with the
    rest of the lens artifacts. (`atlas lens build` now emits this file
    automatically, calibrated from the run's `pass` percentiles.)
+
+   The Lens service also requires `model_identity.json` to match
+   `ATLAS_MODEL_NAME`. Matching embedding dimensions alone are not sufficient:
+   two different models can share a hidden width while having unrelated
+   representation geometry. Missing or mismatched identity keeps Lens scoring
+   unavailable and is surfaced by readiness, `atlas lens check`, and the TUI.
 
    **Retraining from your own use (`atlas lens retrain`).** Instead of a bench
    run, the lens can learn from the workloads you actually run: each agent file
@@ -213,14 +222,15 @@ The Go proxy that runs the agent loop, routes tool calls, and orchestrates the A
 | `ATLAS_LENS_DATA_DIR` | `/data/lens_training` | Where collected lens-training samples are written (per-model `samples.jsonl`). Each agent file-write becomes a candidate sample; a `/feedback` call (per-file accept/deny + pass 👍/👎) labels and weights it. Backed by the `lens-training` Docker volume so it persists across proxy restarts and accumulates toward a retrain. Consumed by `atlas lens retrain`. |
 | `ATLAS_LENS_RETRAIN_MIN` | `2000` | Labeled-sample count at which the TUI surfaces the "retrain available" prompt (`/v1/lens/training-status`). A balance guard also requires ≥ 25% of this in the minority class, so the corpus isn't all-pass or all-fail. Raise for a larger, more representative corpus before retraining. |
 | `ATLAS_V3_TIMEOUT` | `180` | Interactive wall-clock cap (seconds) on a single V3 pipeline call from the agent path (`write_file` / `edit_file`). On timeout the proxy falls back to the model's own content (already syntax-gated) instead of hanging the session — bounds the long-tail Phase-3 repair stall (observed ~11 min on a 103-line write). Set `0` to disable the cap (restores the uncapped behavior for offline bench runs). Source: `proxy/v3_bridge.go:v3CallTimeout`. |
-| `ATLAS_MODEL_NAME` | `Qwen3.5-9B-Q6_K` | Model name for API responses |
+| `ATLAS_MODEL_NAME` | `local-model` | Neutral fallback request identifier; `/v1/models` reports llama-server's loaded model when available |
 | `ATLAS_KEEP_LLAMA_WARM` | `1` | Set to `0` to disable the keep-warm goroutine that pings llama-server every 45s with a 1-token completion. Keeping warm avoids the cold-start path that fires after 1-2 min idle (see ISSUES.md PC-035). Disable for CPU-only or tightly power-budgeted setups. |
 | `ATLAS_FRESH_SLOT_PER_SESSION` | `1` | Set to `0` to disable per-session llama.cpp KV-slot erase. With it enabled (default), the proxy POSTs `/slots/0?action=erase` at the start of each agent loop invocation, giving each turn a clean cache. Adds ~1-2s to the first turn but prevents cross-session token-state leakage (e.g. filenames hallucinated from prior sessions). See ISSUES.md PC-045. |
 | `ATLAS_MAX_TURNS` | (unset) | Operator override for the agent-loop turn cap. Any positive int caps all tiers; unset / `0` / invalid falls through to tier defaults (T0=5, T1/T2/T3=uncapped). See `proxy/types.go:envOverrideMaxTurns`. |
 | `ATLAS_GRAMMAR_MODE` | `strict` | Schema-constrained JSON sampling (#33). Default `strict` ships the full tool-call schema in `response_format` so llama-server's C-side sampler converts it to internal GBNF and the token decoder can ONLY emit our `tool_call/text/done` union. Previously the model could emit any valid JSON and we'd reject + retry post-hoc, burning tokens. Set to `loose` to revert to the old `{"type":"json_object"}` payload — escape hatch for models that handle schema-to-GBNF poorly. |
-| `ATLAS_CONTROL_VECTOR` | `/models/ast_edit_steering.gguf` | Path to the ASA control-vector GGUF for ast_edit steering. Auto-loaded if the file exists; ignored otherwise. |
+| `ATLAS_CONTROL_VECTOR` | `/models/ast_edit_steering.gguf` | Path to the ASA control-vector GGUF. Loaded only when `<path>.model` matches the selected model. |
 | `ATLAS_CONTROL_VECTOR_SCALE` | `0.5` | Strength multiplier applied to the control vector via `--control-vector-scaled`. |
 | `ATLAS_CONTROL_VECTOR_LAYER_RANGE` | (unset) | Restrict the control vector to a layer band. Format is two space-separated integers (e.g. `"24 30"`) — passed straight to llama-server's `--control-vector-layer-range start end`. Unset applies it to all layers. |
+| `ATLAS_CONTROL_VECTOR_ALLOW_UNVERIFIED` | `0` | Emergency opt-out of the model-marker gate. Setting `1` can apply an incompatible vector and is not recommended. |
 | `ATLAS_WORKSPACE_DIR` | (proxy's container `/workspace`) | Working-dir override that the proxy substitutes for the TUI-supplied `working_dir` field. Set inside the container so file tools always resolve under `/workspace` regardless of what the client sends. |
 | `ATLAS_VERIFY_IN` | `sandbox` | Where `run_command` and the V3 verify path execute: `sandbox` (default) routes through the sandbox container; `host` runs commands directly on the proxy host (only safe when the proxy itself is local, not containerized). Per-project override: `[execution] target = "host"` in `.atlas/config.toml`. (PC-192) |
 
@@ -237,7 +247,7 @@ The Go proxy that runs the agent loop, routes tool calls, and orchestrates the A
 | write_file rejection | Existing files > 5 lines | Forces `ast_edit` (whole node, .py/.html/.htm) or `edit_file` (surgical). Skipped when the existing file looks corrupted on disk (PC-201 self-heal). |
 | Suspicious-shrinkage guard | `oldSize ≥ 100B` AND `newSize < 64B` | Rejects writes that replace a non-trivial file with a stub (doctype-only / mid-output cut). See `validateNotSuspiciouslyShrunk`. |
 | Per-step grammar gate | Trigger: write_file rejection on existing .py/.html/.htm > 5 lines | Bans `edit_file` and `write_file` from GBNF tool-name production for next decision (BiasBusters #2/#3) |
-| ASA control vector | Auto-loaded from `/models/ast_edit_steering.gguf` if present (always-on by default) | Activates llama-server `--control-vector-scaled` whenever the file exists at the standard path. Override path with `ATLAS_CONTROL_VECTOR`; tune with `ATLAS_CONTROL_VECTOR_SCALE` (default 0.5) and `ATLAS_CONTROL_VECTOR_LAYER_RANGE` (default all layers). Workflow: `geometric-lens/asa_calibration/README.md` |
+| ASA control vector | Model-gated `/models/ast_edit_steering.gguf` | Activates `--control-vector-scaled` only when the adjacent `.model` marker matches `ATLAS_MODEL_NAME`; a stale vector from another model stays disabled. |
 | Conversation trim | Trigger: `> 12` messages | Keeps `system + most-recent user message (pinned) + last 8` (`trimMessages` in `proxy/agent.go`). The pin is the most-recent `role=="user"` message so long tool-call chains don't push the user's task off the tail. |
 | Command stdout limit | 8,000 chars | Prevents context flooding |
 | Command stderr limit | 4,000 chars | Prevents context flooding |
@@ -254,7 +264,7 @@ These are the 8 safety detectors that replaced the per-tier turn cap on 2026-05-
 |----------|-----------|--------|
 | Tool-call repetition | Same `(tool, args)` signature `3×` within the last `8` calls | `proxy/tool_repeat.go` (`toolRepeatThreshold=3`, `toolRepeatWindow=8`) |
 | Reasoning repetition | Same reasoning snippet `2×` consecutive turns | `proxy/reasoning_repeat.go` (`reasoningRepeatThreshold=2`) |
-| Lens regression | `gx_score_min` runs `2` consecutive turns below `0.15`, OR a single turn below `0.05` (severe) | `proxy/lens_score.go` (`lensRegressionRunLength=2`, `lensLowScoreThreshold=0.15`, `lensSevereThreshold=0.05`) |
+| Lens regression | `gx_score_min` runs `2` consecutive turns below the selected artifact's `low` threshold, OR one turn below its `severe` threshold; disabled if uncalibrated | `proxy/lens_score.go`, `gx_thresholds.json` |
 | Exploration-budget | 4 consecutive read-only calls → nudge; 5+ → skip | `proxy/agent.go:953` |
 | Path-aware error-loop | 3 consecutive failures on the **same** path (rotating paths don't trip) | `proxy/agent.go:838-877` (`consecutiveErrors >= 3` + path match) |
 | Action gate | Turn emits `done` but the user prompt has action-intent and no successful write/edit/ast_edit fired this loop | `proxy/agent.go:404` (action_gate) |
@@ -323,8 +333,8 @@ Python HTTP service that orchestrates the V3 code generation pipeline (PlanSearc
 | `ATLAS_LENS_URL` | `http://localhost:8099` | Geometric Lens endpoint for C(x)/G(x) scoring |
 | `ATLAS_SANDBOX_URL` | `http://localhost:30820` | Sandbox endpoint for code execution |
 | `ATLAS_V3_PORT` | `8070` | Port to listen on |
-| `ATLAS_MODEL_NAME` | `Qwen3.5-9B-Q6_K` | Model name for API calls |
-| `ATLAS_PLAN_THINKING` | `0` | Enable Qwen3.5 thinking mode during V3 plan generation. `0` keeps planner `max_tokens=2048` (fast); `1` raises it to `8192` so the model can emit reasoning before the plan JSON. Off by default — thinking pushes planner latency from ~5-30 s to >4 min per candidate on tight hardware (PC-206). |
+| `ATLAS_MODEL_NAME` | `local-model` | Neutral fallback request identifier; deployments pass the selected model explicitly |
+| `ATLAS_PLAN_THINKING` | `0` | Enable template-level reasoning during V3 plan generation for models that support it. `0` keeps planner `max_tokens=2048`; `1` raises it to `8192` so reasoning does not consume the plan JSON budget. |
 
 ### Internal Constants
 
@@ -365,17 +375,19 @@ Python FastAPI service for C(x)/G(x) scoring, RAG/project indexing, confidence r
 | `CORS_ORIGINS` | `http://localhost:3000,http://localhost:8080` | Allowed CORS origins (comma-separated) |
 | `CONFIG_PATH` | `/app/config/config.yaml` | Path to YAML config file (optional, defaults used if missing) |
 | `API_KEYS_PATH` | `/app/secrets/api-keys.json` | Path to API keys JSON. The lens's `/v1/*` endpoints return 401 until a key file is mounted. |
-| `EMBEDDING_DIM` | `768` | Fallback embedding dimension used by `training.py` when not inferrable from saved weights. (Runtime models use the dim baked into the GGUF; this only matters when training from scratch.) |
 
 ### Scoring Model Parameters
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| C(x) sigmoid midpoint | 19.0 | Energy value mapping to 0.5 normalized score |
-| C(x) sigmoid steepness | 2.0 | Controls normalization curve sharpness |
-| G(x) "likely_correct" threshold | >= 0.7 | Verdict threshold |
-| G(x) "uncertain" threshold | >= 0.3 | Verdict threshold |
-| G(x) "likely_incorrect" threshold | < 0.3 | Verdict threshold |
+| C(x) sigmoid midpoint | Per model | `cx_normalization.json`; energy value mapping to 0.5 |
+| C(x) sigmoid steepness | Per model | `cx_normalization.json`; derived from PASS/FAIL separation |
+| G(x) `low` threshold | Per model | `gx_thresholds.json`; separates likely-correct from uncertain |
+| G(x) `severe` threshold | Per model | `gx_thresholds.json`; below this is likely incorrect |
+
+Missing or invalid calibration never falls back to another model's values.
+C(x) reports a neutral normalized score and G(x) reports `uncalibrated`;
+threshold-based intervention remains disabled while raw telemetry stays visible.
 
 ### Confidence Router
 
@@ -452,22 +464,22 @@ Python FastAPI service for isolated code execution with compilation, linting, an
 
 C++ inference server (llama.cpp) with CUDA GPU acceleration and grammar-constrained JSON output.
 
-Both Docker Compose and K3s use the same image with the same entrypoint (`inference/entrypoint-v3.1-9b.sh`), so the flag set is identical. The only differences are which env vars feed the entrypoint and what default value each deployment passes for them.
+Both Docker Compose and K3s use the same image with the same entrypoint (`inference/entrypoint-v3.1.sh`), so the flag set is identical. The only differences are which env vars feed the entrypoint and what default value each deployment passes for them.
 
-### Entrypoint env vars (read by `entrypoint-v3.1-9b.sh`)
+### Entrypoint env vars (read by `entrypoint-v3.1.sh`)
 
 | Env var | Docker default | K3s default | Description |
 |---------|----------------|-------------|-------------|
 | `MODEL_PATH` | `/models/${ATLAS_MODEL_FILE}` | `/models/${ATLAS_MAIN_MODEL}` | GGUF path inside the container |
 | `PORT` | `8080` | `${ATLAS_LLAMA_PORT}` (defaults to `8080`) | Listen port |
 | `CONTEXT_LENGTH` | `${ATLAS_CTX_SIZE:-131072}` | `${ATLAS_CONTEXT_LENGTH}` (atlas.conf default `16384`) | Context window in tokens, TOTAL across all slots. Size per model + GPU with `atlas tier fit --write`. |
-| `PARALLEL_SLOTS` | `${ATLAS_PARALLEL_SLOTS:-4}` (compose default `4`) | `${ATLAS_PARALLEL_SLOTS}` (atlas.conf default `1`) | Concurrent request slots. Compose defaults to `4` because the `/demo` split-pane runs V3 (which fans out into 3 parallel PlanSearch candidates) alongside a raw-9B session — 4 total concurrent inferences. |
+| `PARALLEL_SLOTS` | `${ATLAS_PARALLEL_SLOTS:-4}` (compose default `4`) | `${ATLAS_PARALLEL_SLOTS}` (atlas.conf default `1`) | Concurrent request slots. Compose defaults to `4` because the `/demo` split-pane runs V3 (which fans out into 3 parallel PlanSearch candidates) alongside a base-agent session — 4 total concurrent inferences. |
 | `KV_CACHE_TYPE_K` | `${ATLAS_KV_TYPE_K:-f16}` | `f16` (entrypoint default) | KV cache key quantization (`f16`, `q8_0`, `q4_0`). Set by `atlas tier fit --write`. |
 | `KV_CACHE_TYPE_V` | `${ATLAS_KV_TYPE_V:-f16}` | `f16` (entrypoint default) | KV cache value quantization. Set by `atlas tier fit --write`. |
 | `UBATCH_SIZE` | `${ATLAS_UBATCH:-1024}` | `1024` (entrypoint default) | Micro-batch size (`-ub`). Drives the compute-buffer VRAM cost (~ubatch × n_embd × 280 bytes). Set by `atlas tier fit --write`. |
 | `BATCH_SIZE` | `${ATLAS_BATCH:-2048}` | `2048` (entrypoint default) | Logical batch size (`-b`). Set by `atlas tier fit --write`. |
 | `SLOT_SAVE_PATH` | `/tmp/slots` | `/tmp/slots` | Slot-save directory used by `/slots/0?action=save` |
-| `ATLAS_CONTROL_VECTOR` | `/models/ast_edit_steering.gguf` | same | ASA control-vector path (auto-loaded if present) |
+| `ATLAS_CONTROL_VECTOR` | `/models/ast_edit_steering.gguf` | same | ASA control-vector path (requires matching `.model` marker) |
 | `ATLAS_CONTROL_VECTOR_SCALE` | `0.5` | same | Scale applied to the control vector |
 | `ATLAS_CONTROL_VECTOR_LAYER_RANGE` | (unset → all layers) | same | Optional layer restriction — two space-separated integers, e.g. `"24 30"` |
 
@@ -494,7 +506,7 @@ The entrypoint always launches with this flag set (regardless of deployment mode
 | `--no-cache-prompt` | — | Disable prompt caching (PC-045: prevents cross-session leakage) |
 | `--embeddings` | — | Enable self-embedding endpoint (lens C(x)/G(x) needs this) |
 | `--jinja` | — | Jinja chat-template support |
-| `--control-vector-scaled` | `$ATLAS_CONTROL_VECTOR:$ATLAS_CONTROL_VECTOR_SCALE` | Added only when the control-vector file exists |
+| `--control-vector-scaled` | `$ATLAS_CONTROL_VECTOR:$ATLAS_CONTROL_VECTOR_SCALE` | Added only when the vector exists and its `.model` marker matches the selected model |
 
 > **Note:** The Docker entrypoint and the K3s entrypoint are the same script. The only practical knobs that diverge are `CONTEXT_LENGTH` (Docker defaults `131072` via `ATLAS_CTX_SIZE`; K3s defaults `16384` via `ATLAS_CONTEXT_LENGTH`) and `PARALLEL_SLOTS` (Docker compose defaults `4` via `ATLAS_PARALLEL_SLOTS` to support `/demo` split-pane plus V3 plan-search fanout; K3s defaults `1` via `atlas.conf`). The runtime-sizing keys (`ATLAS_KV_TYPE_K/V`, `ATLAS_UBATCH`, `ATLAS_BATCH`) are compose-only; on K3s the entrypoint defaults apply unless set in the deployment manifest.
 
@@ -512,9 +524,9 @@ The standalone Python REPL (`pip install -e . && atlas`) reads these variables:
 | `ATLAS_SANDBOX_URL` | `http://localhost:30820` | Sandbox endpoint |
 | `ATLAS_V3_URL` | `http://localhost:8070` | V3 pipeline endpoint (used by `atlas doctor` for reachability checks) |
 | `ATLAS_MODELS_DIR` | `./models` | Host directory holding GGUF model files (used by `atlas doctor` and `atlas model`). |
-| `ATLAS_MODEL_FILE` | `Qwen3.5-9B-Q6_K.gguf` | Expected model filename inside `ATLAS_MODELS_DIR`. |
+| `ATLAS_MODEL_FILE` | **required** | Selected model filename inside `ATLAS_MODELS_DIR`. |
 | `ATLAS_LENS_MODELS` | `./geometric-lens/geometric_lens/models` | Host path that maps to the lens's weight directory. Used by `atlas doctor` so it checks the same directory Docker bind-mounts into the lens container. |
-| `ATLAS_MODEL_NAME` | `Qwen3.5-9B-Q6_K` | Model name for API calls |
+| `ATLAS_MODEL_NAME` | `local-model` | Neutral fallback request identifier; normal installs set the selected model |
 | `HF_TOKEN` | (unset) | HuggingFace write token used by `atlas lens publish` / `atlas asa publish` for artifact upload. Get one at https://huggingface.co/settings/tokens (scope: write). `HUGGINGFACE_HUB_TOKEN` and `HUGGING_FACE_HUB_TOKEN` are also honored. Full walkthrough: [PUBLISHING.md](PUBLISHING.md). |
 | `ATLAS_BACKEND` | `cuda` (default) / `rocm` / `vulkan` | Which llama-server build dispatch path is active. Written by `atlas init` based on GPU vendor (or `--backend vulkan` override). The entrypoint reads this to pick vendor-specific runtime flags. `vulkan` is the universal fallback (PC-114) — ~20–40% slower than tuned native backends but covers AMD/Intel/Snapdragon/Apple-via-MoltenVK/CPU with one image. See [SETUP.md § Vulkan](SETUP.md). |
 | `ATLAS_VK_DEVICE_SELECT` | (unset → first Vulkan ICD enumerated) | Vulkan-only: forwarded to `MESA_VK_DEVICE_SELECT` to pin a specific physical device when multiple ICDs are visible (e.g., dGPU + iGPU, two Intel Arc cards). Format: `"vendorID:deviceID"` (hex) or a device-name substring. Use `GGML_VK_VISIBLE_DEVICES` (numeric index) instead when the Mesa selector isn't granular enough. |
@@ -579,8 +591,8 @@ For K3s deployment only. Copy `atlas.conf.example` to `atlas.conf` and edit. The
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ATLAS_MAIN_MODEL` | `Qwen3.5-9B-Q6_K.gguf` | Main GGUF filename. Becomes `MODEL_PATH=/models/<name>` inside the container. |
-| `ATLAS_DRAFT_MODEL` | `Qwen3-0.6B-Q8_0.gguf` | Draft model filename for speculative decoding. Gated by `ATLAS_ENABLE_SPECULATIVE`; note that Qwen3.5-9B speculative is disabled at the entrypoint level today regardless of this setting. |
+| `ATLAS_MAIN_MODEL` | **required** | Main GGUF filename. Becomes `MODEL_PATH=/models/<name>` inside the container. |
+| `ATLAS_DRAFT_MODEL` | (unset) | Optional compatible draft model for speculative decoding. Gated by `ATLAS_ENABLE_SPECULATIVE`. |
 | `ATLAS_CONTEXT_LENGTH` | `16384` | Per-slot context tokens. V3's `--parallel 1` budget is sized around 16K; raise if you have GPU headroom and want longer turns. |
 | `ATLAS_PARALLEL_SLOTS` | `1` | Concurrent KV slots. V3 self-embeddings push VRAM tight on 16 GB cards, so `1` is the safe default. |
 
@@ -609,7 +621,7 @@ For K3s deployment only. Copy `atlas.conf.example` to `atlas.conf` and edit. The
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ATLAS_ENABLE_SPECULATIVE` | `true` | Gates draft-model download in `scripts/download-models.sh`. Inference-time behavior is currently fixed by the entrypoint (llama.cpp can't speculate hybrid DeltaNet+Attention models yet — see comment in `inference/entrypoint-v3.1-9b.sh`), so this flag only affects whether the draft GGUF is downloaded. |
+| `ATLAS_ENABLE_SPECULATIVE` | `false` | Gates draft-model download in `scripts/download-models.sh`. Enable it only after selecting a draft model compatible with the main model and runtime architecture. |
 | `ATLAS_ENABLE_TRAINING` | `false` | Reserved. The nightly retrain CronJob template was removed — `/internal/lens/retrain` requires a `training_data` payload a scheduled trigger cannot supply. Keep `false` until the service exposes a self-contained trigger. |
 
 ### 8.8 Timeouts (seconds)

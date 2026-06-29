@@ -508,13 +508,13 @@ in either direction), and `atlas onboard` prints the same fit automatically.
 **Fix:** Check the model path:
 ```bash
 # Docker Compose — model must be in ATLAS_MODELS_DIR (default: ./models/)
-ls -la models/Qwen3.5-9B-Q6_K.gguf
+ls -la "models/$ATLAS_MODEL_FILE"
 
 # Bare metal — check ATLAS_MODEL_PATH
-ls -la ~/models/Qwen3.5-9B-Q6_K.gguf
+ls -la "$ATLAS_MODELS_DIR/$ATLAS_MODEL_FILE"
 ```
 
-The filename must match `ATLAS_MODEL_FILE` in `.env` (default: `Qwen3.5-9B-Q6_K.gguf`).
+The filename must match the required `ATLAS_MODEL_FILE` selection in `.env`.
 
 ### Out of VRAM
 
@@ -539,7 +539,7 @@ nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -I{} kill {}
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3.5-9B-Q6_K",
+    "model": "local-model",
     "messages": [{"role":"user","content":"Say hi"}],
     "max_tokens": 50,
     "response_format": {"type": "json_object"}
@@ -655,8 +655,8 @@ add it to the lift list or rephrase the prompt.
 idle for ~30 seconds before the next turn fires. No
 errors, no output — eventually the next tool call appears.
 
-**Cause (PC-043).** Qwen3.5-9B with `/nothink` +
-`response_format: json_object` occasionally emits zero
+**Cause (PC-043).** Some local models under a constrained JSON
+grammar occasionally emit zero
 tokens after a tool result. The grammar requires the
 response to start with `{`, but the model's natural
 continuation after a tool result is a brief whitespace /
@@ -702,7 +702,7 @@ triggers another full V3 cycle (~110s), and the new edits
 sometimes touch code that has nothing to do with the
 original bug.
 
-**Cause (PC-044).** The 9B model has trouble
+**Cause (PC-044).** Compact local models can have trouble
 self-assessing "is the user's original problem solved?"
 After a tool result with `v3_used=true,
 phase_solved=probe`, it has no strong signal to stop, so

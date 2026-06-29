@@ -1,12 +1,74 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestModelsFallsBackToConfiguredModel(t *testing.T) {
+	previous := modelName
+	modelName = "configured-model"
+	t.Cleanup(func() { modelName = previous })
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(upstream.Close)
+	withInferenceURL(t, upstream.URL)
+
+	for _, path := range []string{"/v1/models", "/models"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			newProxyMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+			var payload struct {
+				Data []struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if len(payload.Data) != 1 || payload.Data[0].ID != modelName {
+				t.Fatalf("model data = %#v, want id %q", payload.Data, modelName)
+			}
+		})
+	}
+}
+
+func TestModelsPrefersLoadedModelOverStaleConfig(t *testing.T) {
+	previous := modelName
+	modelName = "stale-config-model"
+	t.Cleanup(func() { modelName = previous })
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("upstream path = %q, want /v1/models", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"loaded-runtime-model"}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+	withInferenceURL(t, upstream.URL)
+
+	rec := httptest.NewRecorder()
+	newProxyMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Data) != 1 || payload.Data[0].ID != "loaded-runtime-model" {
+		t.Fatalf("model data = %#v, want loaded runtime model", payload.Data)
+	}
+}
 
 func withInferenceURL(t *testing.T, url string) {
 	t.Helper()

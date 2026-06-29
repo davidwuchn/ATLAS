@@ -1,6 +1,6 @@
 > **[English](../../SETUP.md)** | **简体中文** | **[日本語](../ja/SETUP.md)** | **[한국어](../ko/SETUP.md)**
 
-> ℹ️ **节选译本。** Aider 已于 2026-05-02 移除。当前聊天 UI 是 `atlas tui`（基于 Bubbletea）。本翻译仅覆盖核心部分，ASA 操控向量、`atlas init` 向导、Plan Mode 等新功能的完整说明请参见英文原版 ([SETUP.md](../../SETUP.md))。
+> ℹ️ **节选译本。** ATLAS 没有固定的默认模型。请通过 `atlas init` 选择注册表模型，或指定兼容的 GGUF。最新的模型无关设置请参见英文原版 ([SETUP.md](../../SETUP.md))。
 
 
 # ATLAS 安装指南
@@ -17,7 +17,7 @@
 | **GPU 驱动** | NVIDIA：专有驱动（`nvidia-smi` 应能显示你的 GPU）。AMD：`amdgpu-dkms` 内核驱动（`/dev/kfd` 必须存在；`rocm-smi` 应能显示你的 GPU）。 |
 | **Python 3.9+** | 含 pip |
 | **wget** | 用于下载模型权重 |
-| **模型权重** | 来自 HuggingFace 的 Qwen3.5-9B-Q6_K.gguf（约 7GB）。Apple Silicon 显存 ≤16GB：改用 Q4_K_M（约 5GB）。 |
+| **模型权重** | `atlas init` 选择的注册表模型，或兼容的 GGUF |
 
 ### 验证 GPU
 

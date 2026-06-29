@@ -33,6 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmark.runner import extract_code
+from benchmark.llm_client import chatml_to_messages
 from benchmark.v3.budget_forcing import BudgetForcing, BudgetForcingConfig
 from benchmark.v3.plan_search import PlanSearch, PlanSearchConfig
 from benchmark.v3.div_sampling import DivSampling, DivSamplingConfig
@@ -220,12 +221,12 @@ def _emit_event(wfile, envelope_opt_in: bool, stage: str, detail: str,
 class LLMAdapter:
     """Calls llama-server's /v1/chat/completions, parsing ChatML prompts into messages.
 
-    PC-206: `thinking` controls Qwen3.5's hybrid reasoning mode.
-    - False (default) — `/nothink` injected, `enable_thinking=False`.
+    PC-206: `thinking` controls template-level reasoning when supported.
+    - False (default) — `enable_thinking=False`.
       Required for grammar-constrained JSON output (the agent's tool-call
       shape) and for the tight V3 sampling loop where reasoning would 5-20×
       output token cost. This matches the previously hardcoded behavior.
-    - True — `/nothink` NOT injected, `enable_thinking=True`. Use for
+    - True — `enable_thinking=True`. Use for
       high-reasoning-value calls (planner, verification, claim-check) where
       the output can absorb a preamble and the strip pattern in __call__
       cleans up `<think>...</think>` blocks before downstream JSON parse.
@@ -314,46 +315,23 @@ class LLMAdapter:
             <|im_start|>system\n...\n<|im_end|>\n<|im_start|>user\n...\n<|im_end|>\n<|im_start|>assistant\n
         """
         prompt = body.pop("prompt", "")
-        model_name = os.environ.get("ATLAS_MODEL_NAME", "Qwen3.5-9B-Q6_K")
+        model_name = os.environ.get("ATLAS_MODEL_NAME", "local-model")
 
         # PC-206: thinking flag drops down from __call__. Default False so
-        # any caller that constructs a body dict directly preserves the
-        # pre-PC-206 /nothink behavior.
+        # callers get bounded generation unless they opt into reasoning.
         thinking = bool(body.pop("_thinking", False))
 
-        # Parse ChatML into messages
-        messages = []
-        parts = re.split(r'<\|im_start\|>(\w+)\n', prompt)
-        # parts = ['', 'system', 'content...<|im_end|>\n', 'user', 'content...<|im_end|>\n', ...]
-        i = 1
-        while i < len(parts) - 1:
-            role = parts[i]
-            content = parts[i + 1].replace('<|im_end|>', '').strip()
-            # Remove think pre-fill from assistant messages
-            content = content.replace('<think>\n\n</think>', '').strip()
-            if content:
-                messages.append({"role": role, "content": content})
-            i += 2
-
-        # If parsing failed, just send as user message
-        if not messages:
+        # Convert the internal prompt carrier into structured messages before
+        # llama-server applies the selected model's own template.
+        messages = chatml_to_messages(prompt)
+        if "<|im_start|>" not in prompt:
             print(f"  [LLM] ChatML parse failed, using raw prompt ({len(prompt)} chars)", flush=True)
-            user_content = prompt if thinking else "/nothink\n" + prompt
-            messages = [{"role": "user", "content": user_content}]
         else:
             print(f"  [LLM] Parsed {len(messages)} messages from ChatML"
                   f" (thinking={'on' if thinking else 'off'})", flush=True)
-            if not thinking:
-                # Ensure /nothink in last user message — NOT enough on its
-                # own (Qwen3 reasoning still streams into reasoning_content
-                # without the chat_template_kwargs flip below), but cheap
-                # belt-and-braces signal to the model.
-                for msg in messages:
-                    if msg["role"] == "user" and not msg["content"].startswith("/nothink"):
-                        msg["content"] = "/nothink\n" + msg["content"]
-            else:
-                # PC-206: strip any /nothink the prompt template hardcoded.
-                # Lets a caller flip thinking on without rewriting prompts.
+            if thinking:
+                # Strip the legacy directive from old prompt templates when a
+                # caller explicitly enables reasoning.
                 for msg in messages:
                     if msg["role"] == "user" and msg["content"].startswith("/nothink"):
                         msg["content"] = msg["content"][len("/nothink"):].lstrip("\n")
@@ -364,12 +342,9 @@ class LLMAdapter:
             "max_tokens": body.get("max_tokens", body.pop("n_predict", 4096)),
             "temperature": body.get("temperature", 0.6),
             "stream": bool(body.get("stream", False)),
-            # PC-206: when thinking=True, Qwen3.5's hybrid reasoning mode is
-            # allowed; the <think>...</think> blocks get stripped in __call__
-            # before downstream JSON parse. When False (the agent-loop default),
-            # enable_thinking=False is the load-bearing one — /nothink in the
-            # prompt alone is NOT enough; confirmed via logs where 2048 tok of
-            # reasoning streamed into delta.reasoning_content with empty content.
+            # The chat template may honor enable_thinking; templates that do
+            # not support it ignore the kwarg. Reasoning blocks are stripped
+            # in __call__ before downstream JSON parsing.
             "chat_template_kwargs": {"enable_thinking": thinking},
         }
         if chat_body["stream"]:
@@ -610,6 +585,13 @@ def score_candidate_per_step(code: str) -> dict:
         if not data.get("enabled"):
             return {}
         agg = data.get("aggregate", {}) or {}
+        thresholds = data.get("thresholds")
+        if not (
+            isinstance(thresholds, dict)
+            and all(isinstance(thresholds.get(k), (int, float))
+                    for k in ("off_rails", "low", "severe"))
+        ):
+            thresholds = None
         result = {
             "n_tokens":            int(data.get("n_tokens", 0)),
             "gx_available":        bool(data.get("gx_available", False)),
@@ -619,6 +601,7 @@ def score_candidate_per_step(code: str) -> dict:
             "cx_norm_max":         float(agg.get("cx_norm_max", 0.0)),
             "cx_norm_mean":        float(agg.get("cx_norm_mean", 0.0)),
             "latency_ms":          float(data.get("latency_ms", 0.0)),
+            "thresholds":          thresholds,
         }
         print(
             f"  [lens] candidate scored: n_tok={result['n_tokens']} "
@@ -632,8 +615,12 @@ def score_candidate_per_step(code: str) -> dict:
         return {}
 
 
-def score_candidate(code: str) -> Tuple[float, float]:
-    """Score code with Geometric Lens C(x). Returns (raw_energy, normalized).
+def score_candidate(code: str) -> Tuple[float, float, bool]:
+    """Score code with Geometric Lens C(x).
+
+    Returns ``(raw_energy, normalized_energy, calibrated)``. The normalized
+    value is neutral when this model has no calibration and must not drive
+    adaptive routing in that case.
 
     Timeout note: 10s was tight under load — the lens shares the box with
     V3's streaming generator and llama-server, and a single hot probe
@@ -650,10 +637,14 @@ def score_candidate(code: str) -> Tuple[float, float]:
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read())
-            return data.get("cx_energy", 0.0), data.get("gx_score", 0.5)
+            return (
+                data.get("cx_energy", 0.0),
+                data.get("cx_normalized", 0.5),
+                bool(data.get("cx_calibrated", False)),
+            )
     except Exception as e:
-        print(f"  [lens] score_candidate failed: {e} — falling back to (0.0, 0.5)", flush=True)
-        return 0.0, 0.5
+        print(f"  [lens] score_candidate failed: {e} — using neutral uncalibrated score", flush=True)
+        return 0.0, 0.5, False
 
 
 # --- Task-type classifier (PC-022) -------------------------------------------
@@ -1192,7 +1183,7 @@ class V3PipelineService:
 
         if not probe_code:
             emit("probe_failed", "No code extracted from probe")
-            # Generate with /nothink
+            # Generate with the minimal reasoning budget
             chatml = self.budget_forcing.format_chatml(problem, "nothink")
             response, tokens, t_ms = llm(chatml, BASE_TEMPERATURE, MAX_TOKENS, 42)
             probe_code = extract_code(response)
@@ -1323,10 +1314,12 @@ class V3PipelineService:
 
         # Score and test probe with self-generated tests
         probe_energy_raw, probe_energy_norm = 0.0, 0.5
+        probe_cx_calibrated = False
         probe_passed = False
         if probe_code:
-            probe_energy_raw, probe_energy_norm = score_candidate(probe_code)
-            emit("probe_scored", f"C(x)={probe_energy_raw:.2f} norm={probe_energy_norm:.2f}")
+            probe_energy_raw, probe_energy_norm, probe_cx_calibrated = score_candidate(probe_code)
+            norm_label = f"{probe_energy_norm:.2f}" if probe_cx_calibrated else "uncalibrated"
+            emit("probe_scored", f"C(x)={probe_energy_raw:.2f} norm={norm_label}")
             probe_passed, probe_stdout, probe_stderr, probe_evidence = verified_sandbox(probe_code)
             emit("probe_sandbox", f"passed={probe_passed} stderr={probe_stderr[:80] if probe_stderr else ''}")
             result["total_tokens"] += tokens
@@ -1344,7 +1337,13 @@ class V3PipelineService:
 
         # ===== PHASE 2: ADAPTIVE K ALLOCATION =====
         emit("phase2", "Allocating compute budget...")
-        k, budget_tier = self.blend_asc.allocate(probe_energy_raw, task_id)
+        if probe_cx_calibrated:
+            k, budget_tier = self.blend_asc.allocate(
+                probe_energy_raw, task_id,
+                normalized_energy=probe_energy_norm,
+            )
+        else:
+            k, budget_tier = self.blend_asc.config.default_k, "standard"
         bf_tier = budget_tier
         emit("phase2_allocated", f"k={k} tier={budget_tier}", k=k, tier=budget_tier)
 
@@ -1357,6 +1356,7 @@ class V3PipelineService:
             candidates.append({
                 "index": 0, "code": probe_code,
                 "energy": probe_energy_raw, "energy_norm": probe_energy_norm,
+                "energy_calibrated": probe_cx_calibrated,
                 "passed": probe_passed, "stdout": "", "stderr": "",
             })
 
@@ -1372,12 +1372,13 @@ class V3PipelineService:
                 )
                 for i, code in enumerate(ps_result.candidates):
                     if code:
-                        energy_raw, energy_norm = score_candidate(code)
+                        energy_raw, energy_norm, energy_calibrated = score_candidate(code)
                         per_step = score_candidate_per_step(code)  # PC-207
                         cand_index = len(candidates)
                         candidates.append({
                             "index": cand_index, "code": code,
                             "energy": energy_raw, "energy_norm": energy_norm,
+                            "energy_calibrated": energy_calibrated,
                             "passed": False, "stdout": "", "stderr": "",
                             "per_step": per_step,
                         })
@@ -1416,12 +1417,13 @@ class V3PipelineService:
                     )
                     code = extract_code(response)
                     if code:
-                        energy_raw, energy_norm = score_candidate(code)
+                        energy_raw, energy_norm, energy_calibrated = score_candidate(code)
                         per_step = score_candidate_per_step(code)  # PC-207
                         cand_index = len(candidates)
                         candidates.append({
                             "index": cand_index, "code": code,
                             "energy": energy_raw, "energy_norm": energy_norm,
+                            "energy_calibrated": energy_calibrated,
                             "passed": False, "stdout": "", "stderr": "",
                             "per_step": per_step,
                         })
@@ -1477,7 +1479,7 @@ class V3PipelineService:
 
         # ===== LENS VETO =====
         # PC-207 alignment fix: hard-reject sandbox-passing candidates whose
-        # geometric-lens gx_min sits in the unambiguously-bad band (<0.05).
+        # geometric-lens gx_min sits below THIS model's calibrated severe band.
         # Sandbox is an ORM (does it execute?), lens is a PRM (is the
         # generation pattern collapsing into a stub?) — they answer
         # different questions. The May 7 dashboard.html session shipped
@@ -1488,17 +1490,18 @@ class V3PipelineService:
         # Language-agnostic by construction: the lens runs on the model's
         # residual stream; gx values don't depend on whether the file
         # being scored is HTML, Python, Rust, or Java.
-        LENS_SEVERE = 0.05
         if passing:
             kept, vetoed = [], []
             for c in passing:
                 per_step = c.get("per_step") or {}
                 gx_min = per_step.get("gx_score_min")
-                if gx_min is not None and gx_min < LENS_SEVERE:
+                severe = (per_step.get("thresholds") or {}).get("severe")
+                if (gx_min is not None and isinstance(severe, (int, float))
+                        and gx_min < severe):
                     vetoed.append(c)
                     emit("lens_veto",
                          f"Candidate {c['index']} sandbox-passed but lens-vetoed "
-                         f"(gx_min={gx_min:.3f} < {LENS_SEVERE}) — likely a stub",
+                         f"(gx_min={gx_min:.3f} < {severe:.3f}) — likely a stub",
                          index=c["index"], gx_score_min=gx_min,
                          first_off_rails_idx=per_step.get("first_off_rails_idx", -1))
                 else:
@@ -1506,7 +1509,7 @@ class V3PipelineService:
             if vetoed:
                 print(
                     f"  [lens] vetoed {len(vetoed)}/{len(passing)} sandbox-passing "
-                    f"candidates with gx_min < {LENS_SEVERE} — falling "
+                    f"candidates using per-model severe thresholds — falling "
                     f"{'through to phase-3 repair' if not kept else 'back to remaining %d' % len(kept)}",
                     flush=True,
                 )
@@ -1888,7 +1891,7 @@ def _build_problem_from_request(
 # a heuristic scorer (V3's lens-based scorer is for code embeddings, not prose
 # plans, so it doesn't apply here).
 #
-# Why bother: when qwen-coder gets a multi-step task without a plan, it
+# Why bother: when a compact coding model gets a multi-step task without a plan, it
 # wanders through 12+ turns of recon before any real work. Forcing the
 # model to commit to an ordered set of steps up front cuts the wander to
 # zero — even a wrong plan beats no plan, because at least the wrongness
@@ -2130,8 +2133,8 @@ def generate_plan(
     emit("plan_start", f"generating {n_candidates} candidate plans")
 
     # PC-206: thinking-aware infrastructure shipped — planner CAN run with
-    # Qwen3.5 hybrid reasoning ON via ATLAS_PLAN_THINKING=1. Default is OFF
-    # because empirically on the reference Qwen3.5-9B-Q6_K + this codebase's
+    # Template-level reasoning ON via ATLAS_PLAN_THINKING=1. Default is OFF
+    # because empirically on the reference local model + this codebase's
     # hardware tier, thinking pushes planner latency from ~5-30s to >4min
     # per candidate (model spends the full token budget reasoning before
     # emitting JSON). On faster GPU tiers the design's aspirational

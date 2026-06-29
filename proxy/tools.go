@@ -687,7 +687,7 @@ func writeFileTool() *ToolDef {
 				return res, err
 			}
 			if ctx.BypassV3 {
-				log.Printf("[write_file] V3 bypassed (demo raw pane) — direct write %s", input.Path)
+				log.Printf("[write_file] V3 bypassed (demo baseline pane) — direct write %s", input.Path)
 			}
 
 			// T1: Direct write — config, data, boilerplate
@@ -799,7 +799,7 @@ func writeFileWithV3(path, baselineContent string, ctx *AgentContext) (*ToolResu
 			}
 			return
 		}
-		// Reasoning deltas during V3 LLM calls (Qwen3.5's <think>
+		// Reasoning deltas during V3 LLM calls (<think>
 		// stream). Forwarded as v3_reasoning_token (NOT plain
 		// reasoning_token) because the agent-loop's reasoning_token
 		// handler in the TUI targets the agent's LLM row — V3 calls
@@ -1019,7 +1019,7 @@ func editFileTool() *ToolDef {
 			actualOldStr := findActualString(content, input.OldStr)
 			if actualOldStr == "" {
 				// GH #39: model occasionally HTML-entity-encodes < > &
-				// inside JSON tool-call args (Qwen3.5 quirk). When the
+				// inside JSON tool-call args (a recurring small-model quirk). When the
 				// disk has literal angle brackets, findActualString
 				// misses. Try once with entities decoded — if the
 				// decoded form matches the file, accept it
@@ -1305,7 +1305,7 @@ func astEditTool() *ToolDef {
 			source := string(data)
 
 			// Empty-content guard. Replacing a node with nothing is a
-			// deletion, not an edit — observed live: Qwen called ast_edit
+			// deletion, not an edit — observed live: a model called ast_edit
 			// with the `content` field omitted entirely, which spliced an
 			// empty string over `function:add` and silently deleted it
 			// (calc.py lost both functions while __main__ still called
@@ -2679,7 +2679,7 @@ func redundantReadShortCircuit(name string, args json.RawMessage, ctx *AgentCont
 	// read, "its content is above" becomes a lie — the model has nothing,
 	// edits blind, and (if weak) hallucinates symbols/lines that aren't in
 	// the file. When the content has been trimmed out, return nil so the
-	// real read re-serves the full file. Verified failure mode: Gemma editing
+	// real read re-serves the full file. Verified failure mode: a model editing
 	// function:count_items / old_str="return len(items)" against a file
 	// containing neither, reasoning "I don't see the file content."
 	if !fileContentInContext(ctx, prev) {

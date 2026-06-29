@@ -173,7 +173,7 @@ class BenchmarkConfig:
         """Main model filename — Docker .env (ATLAS_MODEL_FILE) first, then
         atlas.conf (ATLAS_MAIN_MODEL)."""
         return (self._env.get("ATLAS_MODEL_FILE")
-                or self._conf.get("ATLAS_MAIN_MODEL", "Qwen3.5-9B-Q6_K.gguf"))
+                or self._conf.get("ATLAS_MAIN_MODEL", ""))
 
     @property
     def default_timeout_seconds(self) -> int:

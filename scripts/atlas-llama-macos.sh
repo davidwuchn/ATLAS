@@ -3,7 +3,7 @@
 #
 # Starts the Metal-accelerated llama-server built by
 # scripts/atlas-setup-macos.sh, using the same flags as the docker
-# entrypoint (inference/entrypoint-v3.1-9b.sh) so behavior is
+# entrypoint (inference/entrypoint-v3.1.sh) so behavior is
 # identical to the linux + cuda/rocm path. Reads config from .env in
 # the ATLAS root.
 #
@@ -63,7 +63,7 @@ source "$ATLAS_ROOT/.env"
 set +a
 
 # ---------------------------------------------------------------------------
-# Resolve the runtime knobs. Mirrors inference/entrypoint-v3.1-9b.sh
+# Resolve the runtime knobs. Mirrors inference/entrypoint-v3.1.sh
 # defaults so behavior matches the Docker path.
 # ---------------------------------------------------------------------------
 
@@ -71,6 +71,8 @@ CTX_LENGTH="${ATLAS_CTX_SIZE:-${CONTEXT_LENGTH:-32768}}"
 KV_CACHE_K="${KV_CACHE_TYPE_K:-q8_0}"
 KV_CACHE_V="${KV_CACHE_TYPE_V:-q4_0}"
 PARALLEL="${PARALLEL_SLOTS:-1}"
+BATCH_SIZE="${BATCH_SIZE:-2048}"
+UBATCH_SIZE="${UBATCH_SIZE:-1024}"
 PORT="${OVERRIDE_PORT:-${ATLAS_LLAMA_PORT:-8080}}"
 HOST="${ATLAS_LLAMA_HOST:-127.0.0.1}"
 
@@ -88,12 +90,46 @@ if [[ ! -f "$MODEL_FILE" ]]; then
   exit 1
 fi
 
-# ASA steering vector (#4 BiasBusters). Optional — only loaded if
-# present at the conventional path the docker entrypoint uses.
-CVECTOR_FLAGS=""
-CVECTOR_PATH="$MODELS_DIR/${ATLAS_MODEL_NAME:-model}_ast_edit_steering.gguf"
+# ASA steering vector (#4 BiasBusters). Match the Docker entrypoint's path and
+# model-marker gate so a stale vector cannot steer another model.
+CVECTOR_FLAGS=()
+CVECTOR_PATH="${ATLAS_CONTROL_VECTOR:-$MODELS_DIR/ast_edit_steering.gguf}"
+if [[ "$CVECTOR_PATH" == /models/* ]]; then
+  CVECTOR_PATH="$MODELS_DIR/${CVECTOR_PATH#/models/}"
+fi
+MODEL_BASENAME="$(basename "$MODEL_FILE")"
+MODEL_STEM="${MODEL_BASENAME%.gguf}"
+MODEL_ID="${ATLAS_MODEL_NAME:-$MODEL_STEM}"
+CVECTOR_STATUS="disabled"
 if [[ -f "$CVECTOR_PATH" ]]; then
-  CVECTOR_FLAGS="--control-vector-scaled $CVECTOR_PATH 1.0"
+  CVECTOR_MARKER="$CVECTOR_PATH.model"
+  CVECTOR_MODEL=""
+  if [[ -f "$CVECTOR_MARKER" ]]; then
+    CVECTOR_MODEL="$(tr -d '\r\n' < "$CVECTOR_MARKER")"
+  fi
+  CVECTOR_MODEL_BASE="$(basename "$CVECTOR_MODEL")"
+  CVECTOR_MODEL_STEM="${CVECTOR_MODEL_BASE%.gguf}"
+  if [[ "$CVECTOR_MODEL" == "$MODEL_ID" ||
+        "$CVECTOR_MODEL_BASE" == "$MODEL_BASENAME" ||
+        "$CVECTOR_MODEL_STEM" == "$MODEL_STEM" ||
+        "${ATLAS_CONTROL_VECTOR_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
+    CVECTOR_SCALE="${ATLAS_CONTROL_VECTOR_SCALE:-0.5}"
+    CVECTOR_FLAGS=(--control-vector-scaled "$CVECTOR_PATH:$CVECTOR_SCALE")
+    if [[ -n "${ATLAS_CONTROL_VECTOR_LAYER_RANGE:-}" ]]; then
+      read -r LAYER_START LAYER_END LAYER_EXTRA \
+        <<< "$ATLAS_CONTROL_VECTOR_LAYER_RANGE"
+      if [[ "$LAYER_START" =~ ^[0-9]+$ && "$LAYER_END" =~ ^[0-9]+$ &&
+            -z "${LAYER_EXTRA:-}" ]]; then
+        CVECTOR_FLAGS+=(--control-vector-layer-range "$LAYER_START" "$LAYER_END")
+      else
+        echo "invalid ATLAS_CONTROL_VECTOR_LAYER_RANGE; expected 'START END'" >&2
+        exit 1
+      fi
+    fi
+    CVECTOR_STATUS="$CVECTOR_PATH (model=$CVECTOR_MODEL, scale=$CVECTOR_SCALE)"
+  else
+    CVECTOR_STATUS="disabled: marked for ${CVECTOR_MODEL:-unknown}, selected $MODEL_ID"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -108,7 +144,8 @@ ATLAS llama-server (native macOS Metal) — #32 hybrid path
   KV cache K / V:       $KV_CACHE_K / $KV_CACHE_V
   Port:                 $PORT
   Host:                 $HOST
-  ASA steering:         ${CVECTOR_FLAGS:-disabled}
+  Batch / micro-batch:  $BATCH_SIZE / $UBATCH_SIZE
+  ASA steering:         $CVECTOR_STATUS
   Binary:               $LLAMA_SERVER
 
 EOF
@@ -138,11 +175,11 @@ exec "$LLAMA_SERVER" \
   --host "$HOST" \
   --port "$PORT" \
   --flash-attn on \
-  -b 4096 \
-  -ub 4096 \
+  --fit off \
+  -b "$BATCH_SIZE" \
+  -ub "$UBATCH_SIZE" \
   --slot-save-path "$SLOT_SAVE_PATH" \
   --ctx-checkpoints 0 \
-  --no-cache-prompt \
   --embeddings \
   --jinja \
-  $CVECTOR_FLAGS
+  "${CVECTOR_FLAGS[@]}"

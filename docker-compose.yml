@@ -17,7 +17,7 @@ services:
       - atlas
 
   # --- LLM Inference (CUDA + grammar support) ---
-  # The image's ENTRYPOINT (inference/entrypoint-v3.1-9b.sh) is what runs
+  # The image's ENTRYPOINT (inference/entrypoint-v3.1.sh) is what runs
   # llama-server. It does NOT consume "$@", so a compose `command:` here
   # would be silently ignored. Configure the server via the environment
   # variables the entrypoint actually reads:
@@ -47,7 +47,7 @@ services:
       # bakes in the same script at /entrypoint.sh — this just shadows
       # it during dev. Production GHCR pulls work fine without this
       # mount (the COPY'd entrypoint stands on its own).
-      - ./inference/entrypoint-v3.1-9b.sh:/entrypoint.sh:ro
+      - ./inference/entrypoint-v3.1.sh:/entrypoint.sh:ro
     ports:
       - "127.0.0.1:${ATLAS_LLAMA_PORT:-8080}:8080"
     ulimits:
@@ -62,7 +62,8 @@ services:
     networks:
       - atlas
     environment:
-      - MODEL_PATH=/models/${ATLAS_MODEL_FILE:-Qwen3.5-9B-Q6_K.gguf}
+      - MODEL_PATH=/models/${ATLAS_MODEL_FILE:?Set ATLAS_MODEL_FILE in .env or run atlas init}
+      - ATLAS_MODEL_NAME=${ATLAS_MODEL_NAME:?Set ATLAS_MODEL_NAME in .env or run atlas init}
       - PORT=8080
       # Context length is TOTAL across all slots. llama-server divides it
       # by PARALLEL_SLOTS for per-slot n_ctx_seq. The compose default of
@@ -88,6 +89,7 @@ services:
     environment:
       - LLAMA_URL=http://llama-server:8080
       - LLAMA_EMBED_URL=http://llama-server:8080
+      - ATLAS_MODEL_NAME=${ATLAS_MODEL_NAME:?Set ATLAS_MODEL_NAME in .env or run atlas init}
       - GEOMETRIC_LENS_ENABLED=true
       - PROJECT_DATA_DIR=/data/projects
       - REDIS_URL=redis://redis:6379
@@ -124,7 +126,7 @@ services:
       - ATLAS_INFERENCE_URL=http://llama-server:8080
       - ATLAS_LENS_URL=http://geometric-lens:8099
       - ATLAS_SANDBOX_URL=http://sandbox:8020
-      - ATLAS_MODEL_NAME=${ATLAS_MODEL_NAME:-Qwen3.5-9B-Q6_K}
+      - ATLAS_MODEL_NAME=${ATLAS_MODEL_NAME:?Set ATLAS_MODEL_NAME in .env or run atlas init}
       # Structural call-graph reasoning (#39, experimental, default off). Read by
       # call_graph_enabled() inside this process, so it must be forwarded here.
       - ATLAS_CALL_GRAPH=${ATLAS_CALL_GRAPH:-0}
@@ -229,7 +231,7 @@ services:
       - ATLAS_LENS_URL=http://geometric-lens:8099
       - ATLAS_SANDBOX_URL=http://sandbox:8020
       - ATLAS_V3_URL=http://v3-service:8070
-      - ATLAS_MODEL_NAME=${ATLAS_MODEL_NAME:-Qwen3.5-9B-Q6_K}
+      - ATLAS_MODEL_NAME=${ATLAS_MODEL_NAME:?Set ATLAS_MODEL_NAME in .env or run atlas init}
       # Context budget for conversation trimming (PC-216). Same
       # values the llama-server gets; the proxy trims history to a
       # token budget derived from per-slot context instead of a

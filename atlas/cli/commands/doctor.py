@@ -64,8 +64,7 @@ DASH       = "—" if UNICODE_OK else "--"
 def _read_dotenv() -> Dict[str, str]:
     """Parse the compose .env (the Docker deployment's source of truth) by
     walking up from this file. Lets the model/dir checks reflect what's actually
-    configured instead of falling back to the bundled Qwen defaults when the
-    shell env doesn't export ATLAS_MODEL_FILE."""
+    configured when the shell env doesn't export ATLAS_MODEL_FILE."""
     cur = os.path.dirname(os.path.abspath(__file__))
     for _ in range(8):
         envp = os.path.join(cur, ".env")
@@ -107,15 +106,16 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
 
-# Defaults — shell env first, then the compose .env, then a bundled fallback.
+# Defaults — shell env first, then the compose .env. Model selection has no
+# vendor fallback: the installer must choose a concrete model explicitly.
 PROXY_URL    = os.environ.get("ATLAS_PROXY_URL",     "http://localhost:8090")
 LLAMA_URL    = os.environ.get("ATLAS_INFERENCE_URL", "http://localhost:8080")
 LENS_URL     = os.environ.get("ATLAS_LENS_URL",      "http://localhost:8099")
 SANDBOX_URL  = os.environ.get("ATLAS_SANDBOX_URL",   "http://localhost:30820")
 V3_URL       = os.environ.get("ATLAS_V3_URL",        "http://localhost:8070")
 MODEL_DIR    = os.environ.get("ATLAS_MODELS_DIR")  or _ENV.get("ATLAS_MODELS_DIR", "./models")
-MODEL_FILE   = os.environ.get("ATLAS_MODEL_FILE")  or _ENV.get("ATLAS_MODEL_FILE", "Qwen3.5-9B-Q6_K.gguf")
-MODEL_NAME   = os.environ.get("ATLAS_MODEL_NAME")  or _ENV.get("ATLAS_MODEL_NAME", "Qwen3.5-9B-Q6_K")
+MODEL_FILE   = os.environ.get("ATLAS_MODEL_FILE")  or _ENV.get("ATLAS_MODEL_FILE", "")
+MODEL_NAME   = os.environ.get("ATLAS_MODEL_NAME")  or _ENV.get("ATLAS_MODEL_NAME", "local-model")
 LLAMA_PORT   = _env_int("ATLAS_LLAMA_PORT", 8080)
 # Match docker-compose.yml's `${ATLAS_LENS_MODELS:-./geometric-lens/geometric_lens/models}`
 # host-side bind-mount source so doctor checks the same directory the
@@ -599,6 +599,11 @@ def check_health_endpoints() -> List[CheckResult]:
 
 
 def check_model_file(atlas_root: str) -> CheckResult:
+    if not MODEL_FILE:
+        return CheckResult("model_file", "fail",
+            "ATLAS_MODEL_FILE is not configured",
+            "Run `atlas init` to select a registry model, or set "
+            "ATLAS_MODEL_FILE + ATLAS_MODEL_NAME in .env for a BYO GGUF.")
     # MODEL_DIR is typically `./models` (relative to the compose cwd).
     # Resolve relative paths against atlas_root, not the doctor's cwd.
     base = MODEL_DIR if os.path.isabs(MODEL_DIR) else os.path.join(atlas_root, MODEL_DIR)
@@ -606,8 +611,8 @@ def check_model_file(atlas_root: str) -> CheckResult:
     if not os.path.exists(path):
         return CheckResult("model_file", "fail",
             f"missing: {path}",
-            "Default model? run scripts/download-models.sh. "
-            "Your own model? place the .gguf in ATLAS_MODELS_DIR "
+            "Registry model? run `atlas model install <name>`. "
+            "BYO model? place the .gguf in ATLAS_MODELS_DIR "
             f"({MODEL_DIR}) and set ATLAS_MODEL_FILE + ATLAS_MODEL_NAME in "
             ".env — see docs/CONFIGURATION.md \"Adding your own model\", "
             "or run `atlas model install --url <hf-url>` / `atlas onboard`.")
@@ -615,9 +620,8 @@ def check_model_file(atlas_root: str) -> CheckResult:
     if size < 100 * 1024 * 1024:  # < 100 MB
         return CheckResult("model_file", "warn",
             f"{path} exists but only {size} bytes — likely truncated",
-            "expected > 1 GB for a typical GGUF; re-download "
-            "(scripts/download-models.sh for the default model, or re-fetch "
-            f"your own .gguf into {MODEL_DIR}).")
+            "expected > 1 GB for a typical GGUF; re-download the selected "
+            f"registry model or re-fetch your own .gguf into {MODEL_DIR}.")
     gb = size / (1024 * 1024 * 1024)
     return CheckResult("model_file", "pass", f"{MODEL_FILE} ({gb:.1f} GB)")
 
@@ -646,7 +650,7 @@ def check_asa_steering(atlas_root: str) -> CheckResult:
 
     Warn-not-fail: ATLAS works without it. When present, llama-server
     auto-applies it on startup via `--control-vector-scaled` (see
-    `inference/entrypoint-v3.1-9b.sh`). When absent, the
+    `inference/entrypoint-v3.1.sh`). When absent, the
     `ast_edit`-vs-`edit_file` proposal bias is unsteered and we lean
     entirely on the grammar gate downstream.
 
@@ -781,8 +785,8 @@ def check_tier_constraints(atlas_root: Optional[str] = None) -> CheckResult:
 def check_tier_match() -> CheckResult:
     """PC-055 cross-check: warn if .env settings overshoot the host's tier.
 
-    Example: user on tier-small (8 GB GPU) running with the medium-tier
-    default `Qwen3.5-9B-Q6_K.gguf` will OOM. Doctor flags this as a
+    Example: a user on tier-small selecting a model above that tier's
+    memory budget may OOM. Doctor flags this as a
     warning so the user knows to either downgrade the model or upgrade
     the GPU. We never hard-fail on tier mismatch — sometimes the user
     knows better than the heuristic (e.g., they pre-allocated VRAM
@@ -936,9 +940,9 @@ def check_e2e_smoke() -> CheckResult:
     """
     body = {
         "messages": [{"role": "user", "content": "Reply with the single word: ATLAS"}],
-        # Qwen3.5 with thinking enabled emits 100-200 tokens of
-        # reasoning_content (not surfaced as content) before the visible
-        # answer. Anything < ~250 risks finish=length with empty content.
+        # Reasoning-capable templates may emit internal reasoning before the
+        # visible answer. Leave enough budget that the smoke test does not
+        # mistake a truncated reasoning preamble for failed inference.
         "max_tokens": 300,
         "temperature": 0,
         "stream": False,

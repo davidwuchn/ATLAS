@@ -165,10 +165,10 @@ The JSON schema uses `oneOf` with `additionalProperties: false` and enumerates t
 
 ### Tool-selection bias mitigations (May 2026 BiasBusters synthesis)
 
-Qwen3.5-9B has a documented bias toward `edit_file` over `ast_edit` even
-when ast_edit is correct (BiasBusters arxiv 2510.00307 — embeddings of
-nearby tool names compete; descriptions matter more than names). Four
-defenses compose in the proxy:
+A measured reference deployment showed a bias toward `edit_file` over
+`ast_edit` even when `ast_edit` was correct (BiasBusters arxiv 2510.00307 —
+embeddings of nearby tool names compete; descriptions matter more than names).
+Four model-independent defenses compose in the proxy:
 
 1. **Description rewrite** (`proxy/tools.go`). edit_file's description
    warns against whole-file/whole-function use; ast_edit's description
@@ -186,24 +186,20 @@ defenses compose in the proxy:
 4. **ASA steering vectors** (`geometric-lens/asa_calibration/`).
    Activation steering shifts the residual-stream distribution upstream
    so ast_edit is preferred even on first-attempt decisions before any
-   rejection has fired. Auto-loaded by `inference/entrypoint-v3.1-9b.sh`
-   from `/models/ast_edit_steering.gguf` if the file exists — always-on
-   once the operator has built and dropped the vector via the workflow
+   rejection has fired. Auto-loaded by `inference/entrypoint-v3.1.sh`
+   from `/models/ast_edit_steering.gguf` only when its `.model` sidecar
+   matches the selected model—always-on after a compatible build via the workflow
    in `geometric-lens/asa_calibration/README.md`. Override path/scale/
    layer-range via `ATLAS_CONTROL_VECTOR*` env vars.
 
    **Per-model coupling (PC-061, V3.1.2).** Each ASA vector is trained
-   against a specific model's residual-stream geometry. The shipped
-   `ast_edit_steering.gguf` is calibrated for Qwen3.5-9B (4096-dim, 36
-   layers) — swap in a different model and the vector is at best a no-op
-   and at worst an active mis-steer. `atlas asa check` probes the configured
-   vector vs the loaded model's embedding dim, parses the GGUF metadata for
-   layer count + `model_hint`, and reports `compat` / `needs-build` /
-   `incompatible`. `atlas asa build` wraps the calibration workflow into
-   one CLI invocation that runs inside the lens container (which has the
-   PC-202 hidden-states client). `atlas asa publish` ships trained
-   artifacts to HF and generates a registry-PR — parallel to the
-   `atlas lens` family added in PC-057/058/059. See [CLI.md § atlas asa](CLI.md#atlas-asa-pc-061).
+   against a specific model's residual-stream geometry. No cross-model
+   fallback is safe. `atlas asa check` verifies the `.model` sidecar, probes
+   the loaded embedding dimension, parses GGUF layer metadata, and reports
+   `compat` / `needs-build` / `incompatible`. `atlas asa build` derives the
+   extraction layer from the loaded model, writes the vector and marker, and
+   runs inside the lens container. `atlas asa publish` refuses missing or
+   mismatched markers before upload. See [CLI.md § atlas asa](CLI.md#atlas-asa-pc-061).
 
 All four mitigations compose: ASA biases the proposal distribution
 upstream (item 4), grammar is a hard ban after rejection (item 2),
@@ -282,7 +278,7 @@ flowchart TD
     style Revise fill:#5c3a1a,color:#fff
 ```
 
-**v3-service `/v3/plan` (Python).** `v3-service/main.py` renders `PLAN_PROMPT_TEMPLATE` with the user message + working dir + truncated priority files, then calls the LLM 3× with seed offsets and temperatures `[0.3, 0.5, 0.7]`. The default mode sends `chat_template_kwargs: {enable_thinking: false}` to llama-server because Qwen3.5 routes its `<think>` block into `delta.reasoning_content` (which the chat-completions consumer doesn't see) when thinking is on, so a 2048-token budget burns entirely on reasoning with zero JSON emitted. The `/nothink` directive in the prompt alone is unreliable. Set `ATLAS_PLAN_THINKING=1` to flip both: thinking enabled, planner budget bumped to 8192 tokens (PC-206 — only useful on fast hardware; on tight GPUs planner latency goes from ~5-30 s to >4 min per candidate). Each raw response is parsed with a markdown-fence-tolerant + brace-depth-aware extractor (`_parse_plan_json`), then scored with `_score_plan`:
+**v3-service `/v3/plan` (Python).** `v3-service/main.py` renders `PLAN_PROMPT_TEMPLATE` with the user message + working dir + truncated priority files, then calls the LLM 3× with seed offsets and temperatures `[0.3, 0.5, 0.7]`. By default it sends `chat_template_kwargs: {enable_thinking: false}` and reserves 2,048 output tokens for the plan JSON. Models whose chat templates support that optional flag disable their reasoning channel; templates that do not support it ignore it. Set `ATLAS_PLAN_THINKING=1` to request template-level reasoning and raise the planner budget to 8,192 tokens. ATLAS does not inject family-specific prompt directives. Each raw response is parsed with a markdown-fence-tolerant + brace-depth-aware extractor (`_parse_plan_json`), then scored with `_score_plan`:
 
 - **+0.3** for having a `verify_step`
 - **+0.2** for `len(steps) ∈ [2, 6]`
@@ -405,7 +401,7 @@ Legend: blue = generation, green = verification/selection, brown = repair.
 
 ### Phase Details
 
-**Phase 0: Probe** generates a single baseline candidate with progressive retry (light → standard → /nothink). Scored with C(x)/G(x) and tested in sandbox. If it passes, pipeline exits immediately.
+**Phase 0: Probe** generates a single baseline candidate with progressive budget retry (light → standard → direct-response). It is scored with the selected model's C(x)/G(x) artifacts and tested in the sandbox. If it passes, the pipeline exits immediately.
 
 **Phase 1: Constraint-Driven Generation**
 
@@ -415,13 +411,13 @@ Legend: blue = generation, green = verification/selection, brown = repair.
 
 | Tier | Thinking Tokens | Wait Injection |
 |------|----------------|----------------|
-| nothink | 0 | /nothink prompt |
+| nothink | 0 | Template-level thinking disabled |
 | light | 1,024 | None |
 | standard | 2,048 | If thinking ends < 512 tokens |
 | hard | 4,096 | If thinking ends < 1,024 tokens |
 | extreme | 8,192 | If thinking ends < 2,048 tokens |
 
-Wait injection appends "Wait, let me reconsider.\n" to force longer thinking. Tier selection driven by C(x) energy.
+Wait injection appends "Wait, let me reconsider.\n" to request a longer reasoning pass. Tier selection uses the selected model's calibrated C(x) energy; absent calibration, ATLAS uses the configured default budget rather than another model's constants.
 
 **Phase 2: Verification and Selection**
 
@@ -432,7 +428,7 @@ Wait injection appends "Wait, let me reconsider.\n" to force longer thinking. Ti
 **Phase 3: Repair** (if 0/K pass) — three strategies, sequential with early exit:
 
 - **Failure Analysis**: categorize failures (wrong_algorithm, implementation_bug, edge_case_miss, time_limit, format_error, partial_correct)
-- **Metacognitive Evaluation**: inject compensating constraints from known Qwen3.5 failure patterns
+- **Metacognitive Evaluation**: inject compensating constraints derived from the observed failure category
 - **PR-CoT**: 4 perspectives (logical_consistency, information_completeness, biases, alternative_solutions) x (analysis + repair) = ~8 LLM calls, up to 3 rounds
 - **Refinement Loop**: Failure Analysis → Constraint Refinement → Code Gen → Test → Learn. 2 iterations, 120s budget, ~5+ LLM calls each. Cosine distance filtering (>= 0.15) prevents hypothesis repetition
 - **Derivation Chains**: decompose into up to 5 sub-problems, sandbox-verify each, compose final. ~7+ LLM calls
@@ -503,7 +499,7 @@ The core idea behind the Geometric Lens comes from a simple premise: stop scalin
 
 Anthropic's [Manipulating Manifolds](https://transformer-circuits.pub/2025/linebreaks/index.html) research provides evidence that transformers already create manipulable geometric structures in their embedding space - the raw material is already there. Bar et al.'s [Geometric Unification of Generative AI](https://arxiv.org/html/2510.00666v1) formalizes how distance functions on data manifolds can be learned and used for scoring.
 
-ATLAS implements this with two complementary models. C(x) is a learned energy function (4096-to-512-to-128-to-1 MLP) over the model's own embeddings. Each code candidate gets embedded by llama-server, and C(x) scores where it sits in that geometry. Low energy means the candidate clusters with known-correct code. High energy means it clusters with known-incorrect code. No external oracle, no execution required - just the geometry of the model's own representations.
+ATLAS implements this with two complementary models. C(x) is a learned energy function (`hidden_dim`→512→128→1 MLP) over the selected model's own embeddings. Each code candidate gets embedded by llama-server, and C(x) scores where it sits in that geometry. Low energy means the candidate clusters with known-correct code. High energy means it clusters with known-incorrect code. No external oracle, no execution required—just the geometry of the selected model's representations.
 
 G(x) is the metric tensor - a diagonal tensor in PCA-reduced embedding space that captures how the energy landscape curves in different directions. Where C(x) answers "how good is this candidate?", G(x) answers "which direction should we move to improve it?" The correction engine uses G(x) to compute geometry-aware gradient steps (`-α · G⁻¹ · ∇C`), steering candidates downhill toward correctness along the natural curvature of the manifold rather than taking naive gradient steps. G(x) is implemented and deployed (shipped in V3.0.1, still active in V3.1.0).
 
@@ -511,14 +507,14 @@ G(x) is the metric tensor - a diagonal tensor in PCA-reduced embedding space tha
 
 ```mermaid
 graph LR
-    EE["Embedding Extractor\nllama-server /embedding\n4096-dim"] --> CX["C(x) Cost Field\n4096→512→128→1\nSiLU + Softplus"]
+    EE["Embedding Extractor\nllama-server /embedding\nmodel hidden dim"] --> CX["C(x) Cost Field\nd→512→128→1\nSiLU + Softplus"]
     EE --> GX["G(x) XGBoost\nPCA(128) + classifier"]
     CX --> SVC["Service Layer\nevaluate_combined()"]
     GX --> SVC
     SVC --> V{"Verdict"}
-    V -->|">= 0.7"| LC["likely_correct"]
-    V -->|">= 0.3"| UN["uncertain"]
-    V -->|"< 0.3"| LI["likely_incorrect"]
+    V -->|"at/above artifact low"| LC["likely_correct"]
+    V -->|"between severe and low"| UN["uncertain"]
+    V -->|"below artifact severe"| LI["likely_incorrect"]
 
     TR["Training Pipeline\ncontrastive ranking loss"] --> CX
     EWC["EWC\nFisher information\nprevents catastrophic forgetting"] --> TR
@@ -537,12 +533,24 @@ graph LR
     style CORR fill:#555,color:#ccc
 ```
 
-| Model | Architecture | Training Data | Performance |
+The following figures describe the frozen reference artifacts used for the
+published V3 study; they are provenance, not runtime dimensions or defaults:
+
+| Model | Reference architecture | Training Data | Performance |
 |-------|-------------|---------------|-------------|
 | **C(x)** | 4096→512→128→1 MLP (SiLU, Softplus) | 597 LCB embeddings (504 PASS, 93 FAIL) | Val AUC 0.9467, sep 2.04x |
 | **G(x)** | PCA(4096→128) + XGBoost | 13,398 embeddings (4,835 PASS, 8,563 FAIL) | PCA 80.8% variance |
 
-C(x) normalization: `1 / (1 + exp(-(energy - 19.0) / 2.0))` → [0, 1]. Parameters: 2,163,457 — `cost_field.pt` is **8.3 MiB on disk** (8.65 MB decimal). Math: 4096·512+512 + 512·128+128 + 128·1+1 = 2,163,457 × 4B float32 = 8.25 MiB.
+C(x) normalization is `sigmoid(steepness × (energy - midpoint))`. The
+selected model's `cx_normalization.json` supplies both values; `atlas lens
+build` derives them from that model's labeled PASS/FAIL candidates. G(x)
+verdict thresholds likewise come from `gx_thresholds.json`. Without either
+calibration, normalized decisions stay neutral/uncalibrated rather than
+borrowing the reference artifact's scale.
+
+Every current Lens bundle also contains `model_identity.json`. The service
+requires its model name to match `ATLAS_MODEL_NAME`; embedding-width equality
+alone cannot establish compatibility between two different models.
 
 > **Note:** Model weights (.pt, .pkl files) are not committed to the repository — they are built during training and baked into the container image or mounted at runtime. When model files are absent, the service degrades gracefully: C(x) returns neutral energy, G(x) returns `gx_score: 0.5` and `verdict: "unavailable"`. Training data and weights are available on [HuggingFace](https://huggingface.co/datasets/itigges22/ATLAS).
 
@@ -634,9 +642,9 @@ Language aliases accepted: `py`/`python3` (Python), `js`/`node` (JavaScript), `t
 
 ---
 
-## 7. VRAM Budget
+## 7. Example VRAM Budget
 
-Running on RTX 5060 Ti 16GB with Docker Compose defaults (32K context):
+One measured RTX 5060 Ti 16GB deployment using a 9B Q6 model and 32K context:
 
 | Component | VRAM |
 |-----------|------|
@@ -653,7 +661,7 @@ All computation outside of llama-server runs on CPU. The GPU is used exclusively
 
 ### 7.1 VRAM Budget per Backend
 
-The 8.2 GB / 7.8 GB-free split above is the NVIDIA RTX 5060 Ti 16GB baseline. Other backends differ structurally:
+The 8.2 GB / 7.8 GB-free split above is an example, not an ATLAS model default. Actual usage follows the model, quantization, context, and parallel-slot settings selected by `atlas init`. Other backends differ structurally:
 
 | Backend | Reported "VRAM" | Realistic budget under load | Notes |
 |---|---|---|---|
@@ -718,7 +726,7 @@ On Apple Silicon, `atlas init` writes `ATLAS_BACKEND=metal` and the macOS hybrid
 
 ### 8.5 K3s
 
-Manifests in `templates/*.yaml.tmpl` are rendered into `manifests/*.yaml` by `scripts/generate-manifests.sh` (or `install.sh`'s `process_templates` step) using `envsubst` against `atlas.conf`. Services deploy as Pods in the `atlas` namespace; external access is via NodePort (`ATLAS_PROXY_NODEPORT`, `ATLAS_LLAMA_NODEPORT`, `ATLAS_LENS_NODEPORT`, `ATLAS_SANDBOX_NODEPORT`, `ATLAS_V3_NODEPORT`). The K3s entrypoint is the same `inference/entrypoint-v3.1-9b.sh` used under Docker Compose — context size, KV cache quantization, flash attention, and mlock are all driven by env vars (`ATLAS_CONTEXT_LENGTH`, `ATLAS_FLASH_ATTENTION`, etc.) so behavior is identical across deployment modes. The proxy and sandbox Pods both `hostPath`-mount `${ATLAS_PROJECTS_DIR}` at `/workspace` so the agent's tool calls see the same files in both Pods.
+Manifests in `templates/*.yaml.tmpl` are rendered into `manifests/*.yaml` by `scripts/generate-manifests.sh` (or `install.sh`'s `process_templates` step) using `envsubst` against `atlas.conf`. Services deploy as Pods in the `atlas` namespace; external access is via NodePort (`ATLAS_PROXY_NODEPORT`, `ATLAS_LLAMA_NODEPORT`, `ATLAS_LENS_NODEPORT`, `ATLAS_SANDBOX_NODEPORT`, `ATLAS_V3_NODEPORT`). The K3s entrypoint is the same `inference/entrypoint-v3.1.sh` used under Docker Compose — context size, KV cache quantization, flash attention, and mlock are all driven by env vars (`ATLAS_CONTEXT_LENGTH`, `ATLAS_FLASH_ATTENTION`, etc.) so behavior is identical across deployment modes. The proxy and sandbox Pods both `hostPath`-mount `${ATLAS_PROJECTS_DIR}` at `/workspace` so the agent's tool calls see the same files in both Pods.
 
 `scripts/deploy-9b.sh` accepts `--backend cuda|rocm` (or `ATLAS_BACKEND` env) to deploy either image with the appropriate env-var set. ROCm K8s pods additionally need `/dev/kfd` + `/dev/dri` hostPath mounts and `render`/`video` group membership in their Pod spec — the manifest templates for this are V3.1.2 work; the env-var patch alone isn't sufficient for a working ROCm K3s deployment.
 

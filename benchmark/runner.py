@@ -52,7 +52,7 @@ def extract_code(response: str) -> str:
     - Markdown code blocks with any language label (```python, ```javascript, ...)
     - Plain code blocks (``` ... ```)
     - Raw code without blocks
-    - Qwen3.5 <think>...</think> blocks (stripped before extraction)
+    - optional <think>...</think> reasoning blocks (stripped before extraction)
 
     Args:
         response: Raw LLM response text
@@ -60,7 +60,7 @@ def extract_code(response: str) -> str:
     Returns:
         Extracted Python code
     """
-    # Strip Qwen3.5 thinking blocks first - they can consume tokens
+    # Strip template-emitted thinking blocks first; they can consume tokens
     # before the actual code output
     think_pattern = r'<think>.*?</think>'
     response = re.sub(think_pattern, '', response, flags=re.DOTALL).strip()

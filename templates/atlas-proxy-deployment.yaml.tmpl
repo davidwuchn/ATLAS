@@ -35,7 +35,7 @@ spec:
         - {name: ATLAS_LENS_URL,       value: "http://geometric-lens:${ATLAS_LENS_PORT}"}
         - {name: ATLAS_SANDBOX_URL,    value: "http://sandbox:${ATLAS_SANDBOX_PORT}"}
         - {name: ATLAS_V3_URL,         value: "http://v3-service:${ATLAS_V3_PORT}"}
-        - {name: ATLAS_MODEL_NAME,     value: "Qwen3.5-9B-Q6_K"}
+        - {name: ATLAS_MODEL_NAME,     value: "${ATLAS_MAIN_MODEL}"}
         - {name: ATLAS_VERIFY_IN,      value: "sandbox"}
         - {name: ATLAS_WORKSPACE_DIR,  value: "/workspace"}
         volumeMounts:

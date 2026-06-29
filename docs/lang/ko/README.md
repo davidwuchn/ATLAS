@@ -8,7 +8,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-V3.1.0-blue" alt="버전"/>
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="라이선스"/>
-  <img src="https://img.shields.io/badge/model-Qwen3.5--9B-green" alt="모델"/>
+  <img src="https://img.shields.io/badge/model-agnostic-green" alt="모델 독립적"/>
 </p>
 
 <h1 align="center">A.T.L.A.S.</h1>
@@ -59,7 +59,7 @@ ATLAS는 본인 GPU에서 돌아가는 코딩 어시스턴트입니다. 프로�
    - [Derivation Chains](../../reports/V3_ABLATION_STUDY.md#derivation-chains-0-rescues) - 복잡한 문제를 위한 다단계 추론
 
 4. **[Geometric Lens](../../ARCHITECTURE.md#5-geometric-lens)** - 모델 자체 임베딩 위에서 동작하는 에너지 기반 스코어링. 외부 오라클 불필요. (["Geometric Lens"란?](../../ARCHITECTURE.md#why-geometric-lens))
-   - [C(x) Cost Field](../../ARCHITECTURE.md#scoring-models) - 후보 품질을 스코어링하는 4096→512→128→1 MLP
+   - [C(x) Cost Field](../../ARCHITECTURE.md#scoring-models) - 후보 품질을 스코어링하는 hidden-dim→512→128→1 MLP
    - [G(x) Quality Prediction](../../ARCHITECTURE.md#scoring-models) - 선택에 쓰이는 XGBoost 앙상블
    - [RAG / PageIndex V2](../../ARCHITECTURE.md#rag--pageindex-v2) - AST 인식 코드 검색과 프로젝트 인덱싱
    - [Confidence Router](../../ARCHITECTURE.md#confidence-router--pattern-cache) - Thompson Sampling으로 필요한 후보에 연산 집중

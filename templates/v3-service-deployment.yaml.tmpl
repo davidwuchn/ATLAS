@@ -27,7 +27,7 @@ spec:
         - {name: ATLAS_INFERENCE_URL, value: "http://llama-server:${ATLAS_LLAMA_PORT}"}
         - {name: ATLAS_LENS_URL,      value: "http://geometric-lens:${ATLAS_LENS_PORT}"}
         - {name: ATLAS_SANDBOX_URL,   value: "http://sandbox:${ATLAS_SANDBOX_PORT}"}
-        - {name: ATLAS_MODEL_NAME,    value: "Qwen3.5-9B-Q6_K"}
+        - {name: ATLAS_MODEL_NAME,    value: "${ATLAS_MAIN_MODEL}"}
         readinessProbe:
           httpGet:
             path: /health

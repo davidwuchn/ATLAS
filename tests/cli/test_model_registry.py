@@ -31,11 +31,8 @@ def test_registry_has_known_qwen_entries():
                      "gemma-4-12b-it-Q4_K_M"}
 
 
-def test_only_9b_is_supported_today():
-    """The PC-056 architectural conversation surfaced that only the 9B
-    has Lens artifacts. Gemma 4 12B joined via `atlas lens publish`
-    (PC-215). If this changes again, update here AND the doctor's
-    tier_match check + the docs."""
+def test_only_published_lens_weight_bundles_are_supported_today():
+    """Supported means downloadable weights; calibration is tracked separately."""
     supported = model_registry.supported_models()
     names = {m.name for m in supported}
     assert names == {"Qwen3.5-9B-Q6_K", "gemma-4-12b-it-Q4_K_M"}
@@ -131,9 +128,7 @@ def test_qwen_9b_q6k_claims_asa_supported():
 # ---------------------------------------------------------------------------
 
 def test_for_tier_prefers_supported():
-    """If a tier has multiple registered models, for_tier picks the
-    supported one. Today every tier has only one entry; this guards
-    against future breakage when PC-058 adds variants."""
+    """When several tier entries exist, prefer one with published weights."""
     m = model_registry.for_tier("medium")
     assert m is not None
     assert m.lens_status == "supported"

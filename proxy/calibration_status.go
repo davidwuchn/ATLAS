@@ -32,12 +32,15 @@ type CalibrationStatus struct {
 }
 
 type LensStatus struct {
-	// "supported" | "no-artifacts" | "dim-mismatch" | "unreachable"
+	// "supported" | "no-artifacts" | "incomplete-artifacts" |
+	// "uncalibrated" | "dim-mismatch" | "unreachable"
 	Verdict         string `json:"verdict"`
 	CostFieldLoaded bool   `json:"cost_field_loaded"`
 	CostFieldDim    int    `json:"cost_field_dim"`
 	EmbedDim        int    `json:"embed_dim"`
 	GxLoaded        bool   `json:"gx_loaded"`
+	CxCalibrated    bool   `json:"cx_calibrated"`
+	GxCalibrated    bool   `json:"gx_calibrated"`
 	Hint            string `json:"hint"`
 }
 
@@ -56,12 +59,15 @@ type lensHealthShape struct {
 	Status     string `json:"status"`
 	Subsystems struct {
 		Lens struct {
-			Enabled         bool `json:"enabled"`
-			CostFieldLoaded bool `json:"cost_field_loaded"`
-			CostFieldDim    int  `json:"cost_field_dim"`
-			EmbedDim        int  `json:"embed_dim"`
-			GxLoaded        bool `json:"gx_loaded"`
-			SelfTestPass    bool `json:"self_test_pass"`
+			Enabled         bool   `json:"enabled"`
+			CostFieldLoaded bool   `json:"cost_field_loaded"`
+			CostFieldDim    int    `json:"cost_field_dim"`
+			EmbedDim        int    `json:"embed_dim"`
+			GxLoaded        bool   `json:"gx_loaded"`
+			CxCalibrated    bool   `json:"cx_calibrated"`
+			GxCalibrated    bool   `json:"gx_calibrated"`
+			SelfTestPass    bool   `json:"self_test_pass"`
+			SelfTestError   string `json:"self_test_error"`
 		} `json:"lens"`
 	} `json:"subsystems"`
 }
@@ -99,16 +105,29 @@ func probeLensStatus(ctx context.Context, lensBaseURL string) LensStatus {
 	out.CostFieldDim = h.Subsystems.Lens.CostFieldDim
 	out.EmbedDim = h.Subsystems.Lens.EmbedDim
 	out.GxLoaded = h.Subsystems.Lens.GxLoaded
+	out.CxCalibrated = h.Subsystems.Lens.CxCalibrated
+	out.GxCalibrated = h.Subsystems.Lens.GxCalibrated
 
 	switch {
 	case !out.CostFieldLoaded:
 		out.Verdict = "no-artifacts"
-		out.Hint = "no cost_field.pt loaded — run `atlas lens build` to train one"
+		if h.Subsystems.Lens.SelfTestError != "" {
+			out.Hint = h.Subsystems.Lens.SelfTestError
+		} else {
+			out.Hint = "no cost_field.pt loaded — run `atlas lens build` to train one"
+		}
 	case out.EmbedDim > 0 && out.CostFieldDim != out.EmbedDim:
 		out.Verdict = "dim-mismatch"
 		out.Hint = fmt.Sprintf("cost_field expects %d-dim, model emits %d-dim "+
 			"— run `atlas lens build` to retrain at the model's native dim",
 			out.CostFieldDim, out.EmbedDim)
+	case !out.GxLoaded:
+		out.Verdict = "incomplete-artifacts"
+		out.Hint = "C(x) loaded but G(x) artifacts are missing — run `atlas lens build`"
+	case !out.CxCalibrated || !out.GxCalibrated:
+		out.Verdict = "uncalibrated"
+		out.Hint = "Lens weights loaded without this model's calibration files — " +
+			"run `atlas lens build` to generate cx_normalization.json and gx_thresholds.json"
 	default:
 		out.Verdict = "supported"
 		out.Hint = "ready"
@@ -153,11 +172,27 @@ func probeASAStatus() ASAStatus {
 	for _, p := range candidates {
 		if info, err := os.Stat(p); err == nil {
 			out.VectorPresent = true
-			out.Verdict = "supported"
 			out.VectorPath = p
-			out.Hint = "control vector present (" +
-				strconv.FormatInt(info.Size(), 10) + " bytes); " +
-				"`atlas asa check` does the deeper dim-compat probe"
+			expected := os.Getenv("ATLAS_MODEL_NAME")
+			markedFor := ""
+			if raw, readErr := os.ReadFile(p + ".model"); readErr == nil {
+				markedFor = strings.TrimSpace(string(raw))
+			}
+			size := strconv.FormatInt(info.Size(), 10)
+			switch {
+			case expected != "" && sameModelIdentity(markedFor, expected):
+				out.Verdict = "supported"
+				out.Hint = "control vector verified for " + expected +
+					" (" + size + " bytes)"
+			case expected != "" && markedFor != "":
+				out.Verdict = "incompatible"
+				out.Hint = "control vector is marked for " + markedFor +
+					", but the selected model is " + expected
+			default:
+				out.Verdict = "unverified"
+				out.Hint = "control vector present (" + size +
+					" bytes) without a matching model marker; run `atlas asa build`"
+			}
 			return out
 		}
 	}
@@ -169,6 +204,18 @@ func probeASAStatus() ASAStatus {
 		"build one via `atlas asa build` (PC-061) " +
 		"or geometric-lens/asa_calibration/README.md"
 	return out
+}
+
+func sameModelIdentity(a, b string) bool {
+	canonical := func(value string) string {
+		value = strings.ToLower(strings.TrimSpace(value))
+		value = strings.TrimSuffix(value, ".gguf")
+		if slash := strings.LastIndex(value, "/"); slash >= 0 {
+			value = value[slash+1:]
+		}
+		return value
+	}
+	return canonical(a) != "" && canonical(a) == canonical(b)
 }
 
 func handleCalibrationStatus(w http.ResponseWriter, r *http.Request) {

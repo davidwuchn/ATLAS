@@ -19,14 +19,6 @@ import (
 	"time"
 )
 
-// Threshold below which a write/edit is considered "low quality" by the
-// lens. Calibrated against G(x) verdict bands: 0.7+ likely_correct,
-// 0.3-0.7 uncertain, <0.3 likely_incorrect. We pick a strict 0.15 so
-// only severe quality crashes trigger intervention — the lens already
-// returns false-low scores on short snippets, so the threshold needs
-// margin to avoid false positives on legitimate small edits.
-const lensLowScoreThreshold = 0.15
-
 // Number of consecutive low-score write/edit calls that count as a
 // regression. 2 is the minimum that's clearly a pattern (not a one-off
 // dud); higher values (3+) miss the May 6 stub-loop case where the
@@ -47,8 +39,6 @@ const lensRegressionRunLength = 2
 // surface language of the file being scored — Python stub, HTML stub,
 // Rust stub, Java stub all produce the same kind of low gx_min when
 // the model's internal state collapses to a placeholder pattern.
-const lensSevereThreshold = 0.05
-
 type lensAggregate struct {
 	FirstOffRailsIdx int     `json:"first_off_rails_idx"`
 	GxScoreMin       float64 `json:"gx_score_min"`
@@ -78,21 +68,16 @@ type lensPerStepResult struct {
 	Error       string          `json:"error,omitempty"`
 }
 
-// lowThreshold / severeThreshold resolve the regression thresholds for a score:
-// the per-model values from the lens service when present, else the hardcoded
-// fallback constants (older lenses that don't bundle thresholds).
-func (r lensPerStepResult) lowThreshold() float64 {
-	if r.Thresholds != nil && r.Thresholds.Low > 0 {
-		return r.Thresholds.Low
+// calibratedThresholds returns operating points only when the selected
+// model's Lens artifact supplied a valid calibration. Uncalibrated scores are
+// useful telemetry, but must not trigger corrective behavior using another
+// model's cutoffs.
+func (r lensPerStepResult) calibratedThresholds() (low, severe float64, ok bool) {
+	if r.Thresholds == nil || r.Thresholds.Low <= 0 || r.Thresholds.Severe <= 0 ||
+		r.Thresholds.Severe > r.Thresholds.Low {
+		return 0, 0, false
 	}
-	return lensLowScoreThreshold
-}
-
-func (r lensPerStepResult) severeThreshold() float64 {
-	if r.Thresholds != nil && r.Thresholds.Severe > 0 {
-		return r.Thresholds.Severe
-	}
-	return lensSevereThreshold
+	return r.Thresholds.Low, r.Thresholds.Severe, true
 }
 
 // scoreContentForAgent calls /internal/lens/score-per-step on the given
@@ -196,11 +181,11 @@ func extractFailurePath(toolName string, args json.RawMessage) string {
 // pattern. Returns ("", false) when no intervention is warranted.
 //
 // Pattern: the most recent N (= lensRegressionRunLength) gx_score_min
-// values are all below lensLowScoreThreshold. This is the "model is
+// values are all below the calibrated low threshold. This is the "model is
 // stuck on a stub or near-duplicate response" signature — the May 6
 // resources.html loop is the canonical example.
 // low and severe are the per-model thresholds (resolved from the lens score's
-// bundled thresholds, falling back to the package constants).
+// bundled thresholds. Callers skip intervention when calibration is absent.
 func agentLensRegression(history []float64, low, severe float64) (string, bool) {
 	if len(history) == 0 {
 		return "", false
@@ -223,7 +208,7 @@ func agentLensRegression(history []float64, low, severe float64) (string, bool) 
 			last, severe), true
 	}
 	// Run-of-N moderate-low check: lensRegressionRunLength consecutive
-	// scores below lensLowScoreThreshold (~0.15). Catches gradual stub
+	// scores below the calibrated low threshold. Catches gradual stub
 	// loops where each write is moderately bad but no single one is
 	// catastrophic.
 	if len(history) < lensRegressionRunLength {

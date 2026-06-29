@@ -601,7 +601,8 @@ TIERS: List[TierProfile] = [
         tier="small",
         label="Small (entry-level GPU)",
         description="Conservative settings sized for 8 GB cards. "
-                    "7B Q4 model leaves ~3 GB for KV cache + compute.",
+                    "Choose a registry model that leaves room for KV cache "
+                    "and compute buffers.",
         min_vram_gb=8.0, max_vram_gb=12.0,
         example_gpus=["RTX 3060 8GB", "RTX 4060 8GB",
                       "RX 6600 XT 8GB", "RX 7600 8GB",
@@ -624,8 +625,8 @@ TIERS: List[TierProfile] = [
     TierProfile(
         tier="medium",
         label="Medium (mid-range GPU)",
-        description="ATLAS development target. 9B Q6 model with 32K "
-                    "context fits comfortably with q8/q4 KV cache.",
+        description="ATLAS development target. Registry-selected model with "
+                    "32K context and q8/q4 KV cache.",
         min_vram_gb=12.0, max_vram_gb=20.0,
         example_gpus=["RTX 4060 Ti 16GB", "RTX 5060 Ti 16GB",
                       "RTX 3080 Ti 12GB", "RTX 4070 Ti Super 16GB",
@@ -648,7 +649,7 @@ TIERS: List[TierProfile] = [
     TierProfile(
         tier="large",
         label="Large (high-end consumer GPU)",
-        description="Headroom for 14B Q5/Q6 model with 32K context and "
+        description="Headroom for a larger registry model with 32K context and "
                     "2 parallel slots for multi-conversation.",
         min_vram_gb=20.0, max_vram_gb=32.0,
         example_gpus=["RTX 3090 24GB", "RTX 4090 24GB", "RTX 5090 24GB",
@@ -669,7 +670,7 @@ TIERS: List[TierProfile] = [
     TierProfile(
         tier="xlarge",
         label="X-Large (datacenter GPU)",
-        description="32B+ model with 64K context, 2-4 parallel slots, "
+        description="Large registry model with 64K context, 2-4 parallel slots, "
                     "and full F16 KV cache for maximum quality.",
         min_vram_gb=32.0, max_vram_gb=None,
         example_gpus=["RTX 5090 32GB", "RTX A6000 48GB",

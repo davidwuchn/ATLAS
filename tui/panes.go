@@ -478,7 +478,7 @@ func renderStatsPane(p *pipelineState, width int,
 		parts = append(parts, fmt.Sprintf("turn:%d", p.currentTurn))
 	}
 	// Token usage / context-window pressure. lastTurnTokens reflects the
-	// most recent llm_call_end's total (Qwen3.5 reports prompt+completion
+	// most recent llm_call_end's total (llama-server reports prompt+completion
 	// for the whole call). When that approaches maxTokens, the next turn
 	// will start truncating history — flag in red over 80% utilization.
 	if lastTurnTokens > 0 && maxTokens > 0 {

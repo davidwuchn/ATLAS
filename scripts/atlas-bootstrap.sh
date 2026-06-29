@@ -1001,7 +1001,7 @@ build_atlas_tui() {
 # ---------------------------------------------------------------------------
 
 download_models() {
-    log_step "Step 6: Model weights (Qwen3.5-9B + Lens)"
+    log_step "Step 6: Selected model weights + compatible Lens artifacts"
 
     if [[ "${ATLAS_BOOTSTRAP_SKIP_MODELS:-0}" == "1" ]]; then
         log_skip "Skipped (ATLAS_BOOTSTRAP_SKIP_MODELS=1)"
@@ -1035,18 +1035,17 @@ download_models() {
         die "Model download failed — check the live output above, /tmp/atlas-models.log, disk space, or network."
     fi
 
-    # Lens weights are a separate fetch — the main script's --lens
-    # subcommand drops them in geometric-lens/geometric_lens/models/.
-    # Without these, the lens service starts but returns neutral scores.
-    log_info "Fetching Geometric Lens weights…"
+    # Lens/ASA artifacts are selected per model by the registry-aware
+    # --lens path. Without compatible artifacts, scoring degrades safely.
+    log_info "Fetching model-compatible Lens/ASA artifacts…"
     set +e
     $runner ./scripts/download-models.sh --lens 2>&1 | tee -a /tmp/atlas-models.log
     rc=${PIPESTATUS[0]}
     set -e
     if [[ $rc -eq 0 ]]; then
-        log_ok "Lens weights ready"
+        log_ok "Model-compatible artifacts ready"
     else
-        log_warn "Lens weight fetch failed (exit $rc) — service will run with neutral scores."
+        log_warn "Artifact fetch failed (exit $rc) — service will run with neutral scores."
         log_warn "Recovery: ./scripts/download-models.sh --lens"
     fi
 }
@@ -1178,7 +1177,7 @@ wait_for_healthy() {
 # Step 9: ASA steering vector (BiasBusters #4)
 # ---------------------------------------------------------------------------
 # Builds /models/ast_edit_steering.gguf so llama-server's
-# entrypoint-v3.1-9b.sh appends --control-vector-scaled on every start.
+# entrypoint-v3.1.sh appends --control-vector-scaled on every start.
 # Pipeline (per geometric-lens/asa_calibration/README.md):
 #   1. build_cvector_prompts.py turns contrast_pairs.jsonl into
 #      positive/negative .txt files
@@ -1186,29 +1185,10 @@ wait_for_healthy() {
 #      May 2026) extracts the residual-stream difference and writes the gguf
 #   3. We stop llama-server briefly to free the GPU, run cvector-generator
 #      in a one-shot container with a rw models mount, then restart
-# Fallback: if local build fails (no GPU? cvector-generator missing in
-# older images?), pull a prebuilt vector from the ATLAS HuggingFace
-# dataset. Final failure mode is warn-not-die — ATLAS works without it.
-
-_try_download_asa_from_hf() {
-    local out="$1"
-    local url="https://huggingface.co/datasets/itigges22/ATLAS/resolve/main/models/ast_edit_steering.gguf"
-    log_info "Attempting prebuilt download from HuggingFace…"
-    set +e
-    curl -fSL --connect-timeout 10 -o "$out" "$url" >> /tmp/atlas-asa-build.log 2>&1
-    local rc=$?
-    set -e
-    if [[ $rc -eq 0 ]] && [[ -s "$out" ]]; then
-        log_ok "Downloaded prebuilt ASA vector from HuggingFace"
-        # Make ownership match the rest of the install.
-        if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
-            $SUDO chown "$TARGET_USER:$TARGET_USER" "$out" 2>/dev/null || true
-        fi
-        return 0
-    fi
-    rm -f "$out"
-    return 1
-}
+# No cross-model fallback is safe here. ASA vectors are residual-space
+# artifacts tied to one model. If a registry entry publishes a compatible
+# vector, `atlas model install-artifacts <name>` installs it earlier; otherwise
+# this step trains one locally and degrades to no steering on failure.
 
 build_asa_steering_vector() {
     log_step "Step 9: ASA steering vector (~5 min — BiasBusters #4)"
@@ -1227,22 +1207,33 @@ build_asa_steering_vector() {
     fi
     models_dir="$(realpath "$models_dir" 2>/dev/null || echo "$models_dir")"
     local vector_path="$models_dir/ast_edit_steering.gguf"
-
-    if [[ -f "$vector_path" ]] && [[ -s "$vector_path" ]]; then
-        log_ok "ASA steering vector already present ($(du -h "$vector_path" 2>/dev/null | cut -f1)) — skipping build"
-        return
-    fi
+    local vector_build_path="$models_dir/_ast_edit_steering.new.gguf"
+    local quarantined_vector=""
 
     local asa_dir="$ATLAS_INSTALL_DIR/geometric-lens/asa_calibration"
-    if [[ ! -f "$asa_dir/contrast_pairs.jsonl" ]] || [[ ! -f "$asa_dir/build_cvector_prompts.py" ]]; then
-        log_warn "ASA calibration assets missing at $asa_dir — trying HuggingFace prebuilt fallback"
-        _try_download_asa_from_hf "$vector_path" || \
-            log_warn "ASA unavailable. ATLAS works without it (recovery: see geometric-lens/asa_calibration/README.md)."
+    if [[ ! -f "$asa_dir/build_cvector_prompts.py" ]] || [[ ! -f "$asa_dir/generate_pairs.py" ]]; then
+        log_warn "ASA calibration scripts missing at $asa_dir — steering remains disabled"
         return
     fi
 
     local DC="$DOCKER_PREFIX docker compose"
-    local model_file="${ATLAS_MODEL_FILE:-Qwen3.5-9B-Q6_K.gguf}"
+    local model_file="${ATLAS_MODEL_FILE:-}"
+    if [[ -z "$model_file" ]]; then
+        log_warn "ATLAS_MODEL_FILE is unset — skipping ASA build until a model is selected"
+        return
+    fi
+    if [[ -f "$vector_path" ]] && [[ -s "$vector_path" ]]; then
+        if command -v atlas >/dev/null 2>&1 && \
+           ATLAS_CONTROL_VECTOR="$vector_path" atlas asa check --no-color \
+             >> /tmp/atlas-asa-build.log 2>&1; then
+            log_ok "Compatible ASA steering vector already present ($(du -h "$vector_path" 2>/dev/null | cut -f1)) — skipping build"
+            return
+        fi
+        log_warn "Existing ASA vector is unverified or incompatible with the selected model; rebuilding it"
+        quarantined_vector="$vector_path.incompatible"
+        mv -f "$vector_path" "$quarantined_vector"
+        log_warn "Preserved the prior vector at $quarantined_vector (not auto-loaded)"
+    fi
     local image_tag="${ATLAS_IMAGE_TAG:-latest}"
     local ghcr_owner="${ATLAS_GHCR_OWNER:-itigges22}"
     local image="ghcr.io/${ghcr_owner}/atlas-llama:${image_tag}"
@@ -1251,21 +1242,30 @@ build_asa_steering_vector() {
         runner="$SUDO -u $TARGET_USER"
     fi
 
-    # 1. Build positive/negative prompt files on the host.
+    # 1. Generate the ignored contrast-pair corpus on demand, then render it
+    # with the loaded model's own chat template.
+    if [[ ! -s "$asa_dir/contrast_pairs.jsonl" ]]; then
+        log_info "Generating model-neutral ASA contrast pairs…"
+        if ! $runner python3 "$asa_dir/generate_pairs.py" \
+             --out "$asa_dir/contrast_pairs.jsonl" --n 1000 --seed 42 \
+             >> /tmp/atlas-asa-build.log 2>&1; then
+            log_warn "ASA contrast-pair generation failed — steering remains disabled"
+            return
+        fi
+    fi
     log_info "Generating ASA prompt files from $asa_dir/contrast_pairs.jsonl…"
     set +e
     $runner python3 "$asa_dir/build_cvector_prompts.py" \
         --pairs "$asa_dir/contrast_pairs.jsonl" \
         --positive "$models_dir/_asa_positive.txt" \
         --negative "$models_dir/_asa_negative.txt" \
+        --llama-url "http://localhost:${ATLAS_LLAMA_PORT:-8080}" \
         > /tmp/atlas-asa-build.log 2>&1
     local rc=$?
     set -e
     if [[ $rc -ne 0 ]] || [[ ! -s "$models_dir/_asa_positive.txt" ]]; then
-        log_warn "Prompt file generation failed (exit $rc) — trying HuggingFace fallback"
+        log_warn "Prompt file generation failed (exit $rc) — steering remains disabled"
         rm -f "$models_dir/_asa_positive.txt" "$models_dir/_asa_negative.txt"
-        _try_download_asa_from_hf "$vector_path" || \
-            log_warn "ASA unavailable. ATLAS works without it."
         return
     fi
 
@@ -1286,7 +1286,7 @@ build_asa_steering_vector() {
         --positive-file /models/_asa_positive.txt \
         --negative-file /models/_asa_negative.txt \
         --method mean \
-        -o /models/ast_edit_steering.gguf \
+        -o /models/_ast_edit_steering.new.gguf \
         -ngl 99 2>&1 | tee -a /tmp/atlas-asa-build.log
     rc=${PIPESTATUS[0]}
     set -e
@@ -1300,7 +1300,9 @@ build_asa_steering_vector() {
     # 5. Cleanup intermediate prompt files.
     rm -f "$models_dir/_asa_positive.txt" "$models_dir/_asa_negative.txt"
 
-    if [[ $rc -eq 0 ]] && [[ -s "$vector_path" ]]; then
+    if [[ $rc -eq 0 ]] && [[ -s "$vector_build_path" ]]; then
+        mv -f "$vector_build_path" "$vector_path"
+        printf '%s\n' "${ATLAS_MODEL_NAME:-${model_file%.gguf}}" > "$vector_path.model"
         # Fix ownership (cvector-generator runs as root inside the container).
         if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
             $SUDO chown "$TARGET_USER:$TARGET_USER" "$vector_path" 2>/dev/null || true
@@ -1310,12 +1312,8 @@ build_asa_steering_vector() {
         # Bounce llama-server one more time so it picks up the new vector.
         $DC restart llama-server >> /tmp/atlas-asa-build.log 2>&1 || true
     else
-        log_warn "Local ASA build failed (exit $rc) — trying HuggingFace prebuilt fallback"
-        if _try_download_asa_from_hf "$vector_path"; then
-            $DC restart llama-server >> /tmp/atlas-asa-build.log 2>&1 || true
-        else
-            log_warn "ASA build + HF fallback both failed. ATLAS works without it. Recovery: geometric-lens/asa_calibration/README.md or rerun bootstrap. Log: /tmp/atlas-asa-build.log. Suppress with ATLAS_BOOTSTRAP_SKIP_ASA=1."
-        fi
+        rm -f "$vector_build_path"
+        log_warn "Local ASA build failed (exit $rc). ATLAS will run without steering rather than applying a vector trained for another model. Recovery: geometric-lens/asa_calibration/README.md or rerun bootstrap. Log: /tmp/atlas-asa-build.log. Suppress with ATLAS_BOOTSTRAP_SKIP_ASA=1.${quarantined_vector:+ Prior vector preserved at $quarantined_vector.}"
     fi
 }
 

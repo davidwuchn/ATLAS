@@ -89,7 +89,7 @@ RUN git init /llama.cpp && \
 #    (latter via the previous layer). Cheap step (~1s) so re-running
 #    on patch tweaks is fine.
 #    - sed: spec-decode embeddings fix. Kept for compatibility, harmless
-#      when no draft model is used (Qwen3.5). Falls through silently if
+#      when no draft model is used. Falls through silently if
 #      the target line doesn't exist in newer upstream.
 #    - git apply: PC-202 hidden-states patch. Adds optional `layers:
 #      [int]` request param; response gains `hidden_states` (base64
@@ -132,7 +132,7 @@ COPY --from=builder /llama.cpp/build/bin/llama-cli /usr/local/bin/
 COPY --from=builder /llama.cpp/build/bin/llama-cvector-generator /usr/local/bin/
 RUN mkdir -p /models /templates
 COPY templates/ /templates/
-COPY entrypoint-v3.1-9b.sh /entrypoint.sh
+COPY entrypoint-v3.1.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 EXPOSE 8000
 ENTRYPOINT ["/entrypoint.sh"]

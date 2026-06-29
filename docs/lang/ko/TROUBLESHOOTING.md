@@ -184,13 +184,13 @@ HuggingFace 모델 페이지에는 양자화별 파일 크기가 표시됩니다
 **해결:** 모델 경로를 확인하십시오:
 ```bash
 # Docker Compose - 모델이 ATLAS_MODELS_DIR (기본값: ./models/)에 있어야 합니다
-ls -la models/Qwen3.5-9B-Q6_K.gguf
+ls -la "models/$ATLAS_MODEL_FILE"
 
 # 베어메탈 - ATLAS_MODEL_PATH 확인
-ls -la ~/models/Qwen3.5-9B-Q6_K.gguf
+ls -la "$HOME/models/$ATLAS_MODEL_FILE"
 ```
 
-파일명은 `.env`의 `ATLAS_MODEL_FILE`과 일치해야 합니다 (기본값: `Qwen3.5-9B-Q6_K.gguf`).
+파일명은 `.env`에서 선택한 `ATLAS_MODEL_FILE`과 일치해야 합니다. 고정 모델 기본값은 없습니다.
 
 ### VRAM 부족
 

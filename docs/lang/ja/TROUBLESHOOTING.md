@@ -184,13 +184,13 @@ HuggingFace のモデルページには量子化ごとのファイルサイズ�
 **修正:** モデルパスを確認してください:
 ```bash
 # Docker Compose -- モデルは ATLAS_MODELS_DIR (デフォルト: ./models/) にある必要があります
-ls -la models/Qwen3.5-9B-Q6_K.gguf
+ls -la "models/$ATLAS_MODEL_FILE"
 
 # ベアメタル -- ATLAS_MODEL_PATH を確認
-ls -la ~/models/Qwen3.5-9B-Q6_K.gguf
+ls -la "$HOME/models/$ATLAS_MODEL_FILE"
 ```
 
-ファイル名は `.env` の `ATLAS_MODEL_FILE` (デフォルト: `Qwen3.5-9B-Q6_K.gguf`) と一致する必要があります。
+ファイル名は `.env` で選択した `ATLAS_MODEL_FILE` と一致する必要があります。固定のモデル既定値はありません。
 
 ### VRAM 不足
 

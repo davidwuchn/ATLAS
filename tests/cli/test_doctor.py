@@ -17,6 +17,14 @@ import sys
 from atlas.cli.commands import doctor
 
 
+def test_check_model_file_requires_explicit_selection(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "MODEL_FILE", "")
+    result = doctor.check_model_file(str(tmp_path))
+    assert result.status == "fail"
+    assert "ATLAS_MODEL_FILE is not configured" in result.message
+    assert "atlas init" in result.detail
+
+
 def test_check_metal_native_skips_on_non_darwin(monkeypatch):
     """On Linux + Windows the metal hybrid path doesn't apply at all.
     The check must return `skip` so it shows up as a no-op in doctor

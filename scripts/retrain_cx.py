@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 ATLAS_DIR = os.environ.get("ATLAS_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-"""Retrain C(x) cost field using llama-server 9B embeddings.
+"""Retrain C(x) cost field using the selected llama-server model.
 
 Collects code + pass/fail labels from ablation results,
 embeds each through llama-server at localhost:8080, then trains
@@ -17,15 +17,31 @@ import random
 from urllib.request import Request, urlopen
 
 # Add geometric-lens to path for imports
-sys.path.insert(0, '" + ATLAS_DIR + "/geometric-lens')
+sys.path.insert(0, os.path.join(ATLAS_DIR, "geometric-lens"))
 
-LLAMA_EMBED_URL = "http://localhost:8080/embedding"
-MODELS_DIR = "" + ATLAS_DIR + "/geometric-lens/geometric_lens/models"
-DATA_DIR = "" + ATLAS_DIR + "/docs/reports/ablation/condition_a"
+LLAMA_BASE_URL = os.environ.get(
+    "ATLAS_INFERENCE_URL", os.environ.get("LLAMA_URL", "http://localhost:8080")
+).rstrip("/")
+LLAMA_EMBED_URL = f"{LLAMA_BASE_URL}/embedding"
+MODELS_DIR = os.path.join(ATLAS_DIR, "geometric-lens", "geometric_lens", "models")
+DATA_DIR = os.path.join(ATLAS_DIR, "docs", "reports", "ablation", "condition_a")
+
+
+def get_loaded_model_name() -> str:
+    """Return llama-server's loaded model id for artifact provenance."""
+    try:
+        with urlopen(f"{LLAMA_BASE_URL}/v1/models", timeout=10) as resp:
+            data = json.loads(resp.read())
+        models = data.get("data", [])
+        if models and models[0].get("id"):
+            return str(models[0]["id"])
+    except Exception:
+        pass
+    return os.environ.get("ATLAS_MODEL_NAME", "unknown-local-model")
 
 
 def get_llama_embedding(text: str, retries: int = 2) -> list:
-    """Get 4096-dim embedding from llama-server (Qwen3.5-9B).
+    """Get a model-native embedding from llama-server.
 
     Returns the pooled embedding list, or raises the underlying urlopen
     exception after exhausting retries.
@@ -286,7 +302,7 @@ def compute_auc(scores, labels):
 
 def main():
     print("=" * 60)
-    print("C(x) Cost Field Retraining — llama-server 9B Embeddings")
+    print("C(x) Cost Field Retraining — selected-model embeddings")
     print("=" * 60)
 
     # Step 1: Collect labeled code
@@ -318,14 +334,15 @@ def main():
     print(f"  Embedding dim: {len(embeddings[0])}")
 
     # Save embeddings for future use
-    emb_path = os.path.join(MODELS_DIR, "training_embeddings_llama9b.json")
+    model_name = get_loaded_model_name()
+    emb_path = os.path.join(MODELS_DIR, "training_embeddings_selected_model.json")
     print(f"\n[3/4] Saving embeddings to {emb_path}...")
     with open(emb_path, 'w') as f:
         json.dump({
             "embeddings": embeddings,
             "labels": labels,
             "dim": len(embeddings[0]),
-            "model": "Qwen3.5-9B (llama-server)",
+            "model": model_name,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "n_pass": sum(1 for l in labels if l == "PASS"),
             "n_fail": sum(1 for l in labels if l == "FAIL"),
@@ -350,6 +367,12 @@ def main():
     # Save new model
     torch.save(model.state_dict(), old_path)
     print(f"  Saved new model to {old_path}")
+    from geometric_lens.calibration import (
+        derive_cx_normalization, save_cx_normalization,
+    )
+    calibration = derive_cx_normalization(pass_mean, fail_mean)
+    calibration_path = save_cx_normalization(MODELS_DIR, calibration)
+    print(f"  Saved C(x) calibration to {calibration_path}")
 
     # Save stats
     stats = {
@@ -360,7 +383,7 @@ def main():
         "n_pass": sum(1 for l in labels if l == "PASS"),
         "n_fail": sum(1 for l in labels if l == "FAIL"),
         "dim": len(embeddings[0]),
-        "model": "Qwen3.5-9B (llama-server)",
+        "model": model_name,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     stats_path = os.path.join(MODELS_DIR, "retrain_stats.json")

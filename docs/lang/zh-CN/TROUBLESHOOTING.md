@@ -184,13 +184,13 @@ HuggingFace 模型页面会列出每个量化的文件大小 — 下载前请对
 **解决方法：** 检查模型路径：
 ```bash
 # Docker Compose - 模型必须在 ATLAS_MODELS_DIR 中（默认：./models/）
-ls -la models/Qwen3.5-9B-Q6_K.gguf
+ls -la "models/$ATLAS_MODEL_FILE"
 
 # 裸机 - 检查 ATLAS_MODEL_PATH
-ls -la ~/models/Qwen3.5-9B-Q6_K.gguf
+ls -la "$HOME/models/$ATLAS_MODEL_FILE"
 ```
 
-文件名必须与 `.env` 中的 `ATLAS_MODEL_FILE` 匹配（默认：`Qwen3.5-9B-Q6_K.gguf`）。
+文件名必须与 `.env` 中选择的 `ATLAS_MODEL_FILE` 匹配。没有固定的模型默认值。
 
 ### 显存不足
 

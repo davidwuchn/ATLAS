@@ -40,8 +40,8 @@ Schema notes:
   install** (was print-only in PC-056). Verifies download integrity,
   not provenance. Stronger provenance verification is PC-060 territory.
 - `lens_status` values:
-    "supported"   — metric tensor + embeddings present in repo, has
-                    been validated end-to-end against this exact quant
+    "supported"   — model-specific Lens weights are published and
+                    downloadable for this exact model
     "no-artifacts" — model exists but Lens won't score it (no tensor
                     trained at all)
     "unverified"  — has artifacts that should structurally apply (e.g.,
@@ -56,6 +56,10 @@ Schema notes:
   the artifact dir for `lens_status: supported` to be honest. Doctor's
   tier_match cross-checks this — if a model claims supported but
   artifacts are missing, that's a config drift that should warn.
+- `lens_calibrated`: distinguishes current bundles containing per-model
+  C(x) normalization and G(x) operating thresholds from legacy weight
+  bundles. A legacy supported bundle remains downloadable, but runtime
+  interventions stay disabled until it is rebuilt and republished.
 
 PC-056.1 install hardening (relative to PC-056):
 - SHA256 enforced at download time (delete file + exit 1 on mismatch)
@@ -82,6 +86,10 @@ class Model:
     model_display: str             # human-friendly UI name
     model_size_gb: float           # on-disk size — informs disk-space messaging
     lens_status: str               # 'supported' | 'no-artifacts' | 'unverified'
+    # True only when the published bundle includes current per-model C(x)
+    # normalization and G(x) operating thresholds. `lens_status=supported`
+    # means weights are available; this flag distinguishes legacy bundles.
+    lens_calibrated: bool = False
     download_url: Optional[str] = None   # None = no known URL at all
     sha256: Optional[str] = None         # content hash (HF x-linked-etag) when known
     license: Optional[str] = None        # SPDX-ish identifier (Apache-2.0, etc.)
@@ -238,7 +246,11 @@ REGISTRY: List[Model] = [
         model_display="Qwen3.5 9B (Q6_K)",
         # PC-056 verified 2026-05-01: Content-Length = 7458301152 bytes.
         model_size_gb=6.94,
+        # Legacy C(x)+metric-tensor bundle predates per-model C(x)/G(x)
+        # calibration files. Downloadable for migration, but not production-
+        # calibrated until it is rebuilt and republished.
         lens_status="supported",
+        lens_calibrated=False,
         # PC-056.1: pinned to commit hash (was resolve/main/...).
         download_url=_unsloth_qwen35_url("Qwen3.5-9B-GGUF",
                                           "Qwen3.5-9B-Q6_K.gguf"),
@@ -267,8 +279,9 @@ REGISTRY: List[Model] = [
             "https://huggingface.co/datasets/itigges22/ATLAS/"
             "resolve/main/models/"
         ),
-        notes="ATLAS development target. Lens artifacts trained and "
-              "shipped in the repo (cost_field.pt + metric_tensor.pt). "
+        notes="ATLAS development target. Legacy Lens artifacts are "
+              "downloadable but require `atlas lens build` to add current "
+              "per-model calibration. "
               "ASA control vector built + published to HF 2026-05-12. "
               "End-to-end supported.",
     ),
@@ -339,13 +352,17 @@ REGISTRY: List[Model] = [
         model_file="gemma-4-12b-it-Q4_K_M.gguf",
         model_display="gemma-4-12b-it-Q4_K_M",
         model_size_gb=6.6,
+        # Published before cx_normalization.json/gx_thresholds.json became
+        # required. Keep the model-specific weights downloadable while the
+        # separate calibration flag prevents a production-ready claim.
         lens_status="supported",
+        lens_calibrated=False,
         download_url=None,
         sha256=None,
         license="apache-2.0",
         lens_artifact_files=["cost_field.pt", "cost_field.safetensors", "gx_xgboost.json", "gx_weights.json"],
         lens_hf_repo="itigges22/atlas-lens-gemma4-12b",
-        notes="Added via `atlas lens publish` — lens artifacts "
+        notes="Added via `atlas lens publish` — legacy uncalibrated artifacts "
               "(3840-dim) at https://huggingface.co/itigges22/atlas-lens-gemma4-12b. "
               "download_url not captured at publish time; maintainers "
               "can fill it in for `atlas model install` support.",
@@ -363,10 +380,9 @@ REGISTRY: List[Model] = [
 def for_tier(tier_name: str) -> Optional[Model]:
     """Return the default model recommendation for a tier name.
 
-    "Default" = the supported model if any tier-matched entry has
-    `lens_status == "supported"`, otherwise the first tier-matched
-    entry (which by definition is `no-artifacts`). Callers can inspect
-    `lens_status` to render the warning.
+    "Default" = a calibrated supported model when available, otherwise a
+    supported legacy bundle, otherwise the first tier-matched entry. Callers
+    inspect `lens_status` and `lens_calibrated` to render any warning.
 
     Returns None for tier names not in the registry (e.g., 'cpu',
     or unknown tiers). Caller decides how to render that.
@@ -375,7 +391,9 @@ def for_tier(tier_name: str) -> Optional[Model]:
     if not matches:
         return None
     supported = [m for m in matches if m.lens_status == "supported"]
-    return supported[0] if supported else matches[0]
+    calibrated = [m for m in supported if m.lens_calibrated]
+    return calibrated[0] if calibrated else (supported[0] if supported
+                                              else matches[0])
 
 
 def tier_for_model(model_file: str) -> Optional[str]:
@@ -410,8 +428,10 @@ def models_for_tier(tier_name: str) -> List[Model]:
 
 
 def supported_models() -> List[Model]:
-    """Models with end-to-end Lens support — i.e., what `atlas model
-    install` will install without `--no-lens`."""
+    """Models with downloadable model-specific Lens weights.
+
+    `lens_calibrated` separately identifies current production bundles.
+    """
     return [m for m in REGISTRY if m.lens_status == "supported"]
 
 

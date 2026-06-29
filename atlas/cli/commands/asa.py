@@ -2,8 +2,8 @@
 
 Parallels `atlas lens` for the BiasBusters #4 steering vectors. Same
 model-coupling problem the Lens had before PC-057/058: a steering vector
-trained against Qwen3.5-9B's residual-stream geometry (4096-dim, 36
-layers) doesn't transfer to a different model. This module wraps the
+trained against one model's residual-stream geometry doesn't transfer to
+a different model. This module wraps the
 existing `geometric-lens/asa_calibration/build_steering_vector.py`
 workflow into one CLI so swap-in models can be calibrated end-to-end.
 
@@ -25,7 +25,7 @@ docker-cp + docker-exec dance keeps the source of truth at one path.
 
 Invoke:
     atlas asa check                       # probe the running stack
-    atlas asa build                       # train fresh vector w/ bundled pairs
+    atlas asa build                       # generate pairs + train fresh vector
     atlas asa build --pairs custom.jsonl  # train with custom contrast pairs
     atlas asa build --limit 50            # smoke test (50 pairs, ~1 min)
     atlas asa publish --repo USER/REPO    # upload + open registry-PR
@@ -65,7 +65,7 @@ def _safe_print(s: str = "") -> None:
         print(s.encode("ascii", errors="replace").decode("ascii"))
 
 
-# Default paths shared with the entrypoint (inference/entrypoint-v3.1-9b.sh).
+# Default paths shared with the entrypoint (inference/entrypoint-v3.1.sh).
 # Keep aligned — operators expect `atlas asa` to point at the same file
 # llama-server will actually --control-vector-scaled at boot.
 DEFAULT_VECTOR_NAME = "ast_edit_steering.gguf"
@@ -111,6 +111,23 @@ def _atlas_root() -> str:
     """Reuse lens.py's resolution so both subcommand families walk up the
     same way."""
     return lens_module._atlas_root()
+
+
+def _canonical_model_identity(value: Optional[str]) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    name = text.rsplit("/", 1)[-1]
+    if name.lower().endswith(".gguf"):
+        name = name[:-5]
+    return name.casefold()
+
+
+def _model_marker_value(value: Optional[str]) -> str:
+    """Normalize a loaded-model path into a portable sidecar value."""
+    text = str(value or "").strip().replace("\\", "/")
+    name = text.rsplit("/", 1)[-1]
+    if name.lower().endswith(".gguf"):
+        name = name[:-5]
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +231,7 @@ class ASACheckVerdict:
     vector_dim: Optional[int] = None
     vector_layer_count: Optional[int] = None
     vector_model_hint: Optional[str] = None
+    vector_model_marker: Optional[str] = None
     unverified: bool = False  # True when dim couldn't be parsed
 
     @property
@@ -247,6 +265,25 @@ def _check_asa(atlas_root: str) -> ASACheckVerdict:
     if not meta["present"]:
         v.reason = (f"no control vector at {vpath}. Run `atlas asa build` "
                     f"to train one, or drop a pre-built .gguf at the path.")
+        return v
+
+    marker_path = vpath + ".model"
+    try:
+        with open(marker_path) as marker_file:
+            v.vector_model_marker = marker_file.read().strip() or None
+    except OSError:
+        v.vector_model_marker = None
+    selected_model = probe.model_name or os.environ.get("ATLAS_MODEL_NAME", "")
+    if not v.vector_model_marker:
+        v.reason = (f"control vector is present but {marker_path} is missing. "
+                    "The inference entrypoint will keep it disabled; run "
+                    "`atlas asa build` to create a verified vector and marker.")
+        return v
+    if (selected_model and _canonical_model_identity(v.vector_model_marker)
+            != _canonical_model_identity(selected_model)):
+        v.reason = (f"control vector is marked for {v.vector_model_marker!r}, "
+                    f"but llama-server has {selected_model!r} loaded. The "
+                    "entrypoint will keep it disabled; run `atlas asa build`.")
         return v
 
     if meta["dim"] is None:
@@ -311,6 +348,7 @@ def _emit_check(args: argparse.Namespace, color: bool) -> int:
             _safe_print(f"  layer count:  {v.vector_layer_count}")
         if v.vector_model_hint:
             _safe_print(f"  model hint:   {v.vector_model_hint}")
+        _safe_print(f"  model marker: {v.vector_model_marker or '(missing)'}")
     _safe_print("")
     _safe_print(f"  {v.reason}")
     return v.exit_code
@@ -379,6 +417,22 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
         return 2
     _safe_print(f"  model emits {probe.embedding_dim}-dim residuals; "
                 f"container running")
+    layer = args.layer
+    if layer is None:
+        if not probe.n_layers:
+            _safe_print(f"  {RED if color else ''}can't derive an ASA layer: "
+                        f"llama-server did not report model depth. Pass "
+                        f"--layer explicitly.{RESET if color else ''}")
+            return 2
+        layer = max(1, round(probe.n_layers * 0.75))
+    if (args.model and probe.model_name
+            and _canonical_model_identity(args.model)
+            != _canonical_model_identity(probe.model_name)):
+        _safe_print(f"  {RED if color else ''}requested model "
+                    f"{args.model!r}, but llama-server has "
+                    f"{probe.model_name!r} loaded. Refusing to train and "
+                    f"mislabel a vector.{RESET if color else ''}")
+        return 2
 
     # 2. Resolve script + pairs paths on the host
     asa_dir = os.path.join(atlas_root, "geometric-lens", "asa_calibration")
@@ -389,6 +443,23 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
                     f"build_steering_vector.py at {script_host}. Are you in "
                     f"an ATLAS checkout?{RESET if color else ''}")
         return 1
+    if not os.path.isfile(pairs_host) and not args.pairs:
+        generator = os.path.join(asa_dir, "generate_pairs.py")
+        if not os.path.isfile(generator):
+            _safe_print(f"  {RED if color else ''}contrast-pair generator "
+                        f"not found at {generator}.{RESET if color else ''}")
+            return 1
+        _safe_print("  generating default model-neutral contrast pairs…")
+        generated = subprocess.run(
+            [sys.executable, generator, "--out", pairs_host,
+             "--n", "1000", "--seed", "42"],
+            capture_output=True, text=True,
+        )
+        if generated.returncode != 0:
+            _safe_print(f"  {RED if color else ''}contrast-pair generation "
+                        f"failed: {generated.stderr.strip()}"
+                        f"{RESET if color else ''}")
+            return 1
     if not os.path.isfile(pairs_host):
         _safe_print(f"  {RED if color else ''}contrast pairs not found at "
                     f"{pairs_host}.{RESET if color else ''}")
@@ -400,10 +471,8 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
 
     # 3. Stage script + pairs into the container. We also pre-emptively
     # delete any stale `/tmp/ast_edit_steering.gguf` from a previous
-    # failed run — otherwise a fresh training crash that writes nothing
-    # would let step [4/5] silently `docker cp` the OLD vector back to
-    # the host as if it were a new build. (Silent data corruption bug,
-    # caught in round-2 audit.)
+    # failed run. Otherwise a fresh crash that writes nothing could copy
+    # the old vector back to the host as if it were a new build.
     _safe_print(f"[2/5] Staging script + pairs into {container}…")
     _docker_exec(container, ["rm", "-f", "/tmp/ast_edit_steering.gguf"])
     for src, dst in [(script_host, "/tmp/build_steering_vector.py"),
@@ -418,7 +487,7 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
 
     if args.dry_run:
         _safe_print(f"[3/5] (dry-run) would run build_steering_vector.py "
-                    f"with --layer {args.layer} "
+                    f"with --layer {layer} "
                     f"--limit {args.limit if args.limit else 'all'}")
         # Even in dry-run, clean up the staged script + pairs so we
         # don't leave them in the container's /tmp. The cleanup loop
@@ -432,12 +501,12 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
     # files in the container's /tmp always get cleaned up — even when
     # the training run crashes or we hit a sanity-check failure on the
     # output. Otherwise repeated failed runs would pile up in /tmp.
-    _safe_print(f"[3/5] Training (layer {args.layer}, "
+    _safe_print(f"[3/5] Training (layer {layer}, "
                 f"{args.limit or 'all'} pairs). Takes ~25 min for 1000 pairs…")
     cmd = ["python3", "/tmp/build_steering_vector.py",
             "--pairs", "/tmp/contrast_pairs.jsonl",
             "--out", "/tmp/ast_edit_steering.gguf",
-            "--layer", str(args.layer)]
+            "--layer", str(layer)]
     if args.limit:
         cmd += ["--limit", str(args.limit)]
     # Stamp the vector's metadata with the real model's architecture and
@@ -495,9 +564,9 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
                         f"{cp.stderr.strip()}{RESET if color else ''}")
             return 1
 
-        # Size sanity check. A real ASA vector for a 4096-dim model is
-        # ~32 KB (1 float32 direction × 4096 dims + GGUF header). A few
-        # hundred bytes means the training script crashed mid-write to
+        # Size sanity check. A real ASA vector contains at least one
+        # float32 direction plus a GGUF header. A few hundred bytes means
+        # the training script crashed mid-write to
         # its tempfile and produced a truncated/empty GGUF — reporting
         # that as success would be worse than a clean failure. 1 KB
         # floor catches all realistic truncation modes while staying
@@ -514,6 +583,19 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
                 pass
             return 1
         _safe_print(f"  saved: {out_path} ({size} bytes)")
+        model_identity = _model_marker_value(args.model or probe.model_name)
+        if not model_identity:
+            _safe_print(f"  {RED if color else ''}could not identify the "
+                        f"loaded model for the ASA safety marker."
+                        f"{RESET if color else ''}")
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+            return 1
+        with open(out_path + ".model", "w") as marker:
+            marker.write(str(model_identity).strip() + "\n")
+        _safe_print(f"  model marker: {out_path}.model ({model_identity})")
 
         copied_out = True
         _safe_print("")
@@ -637,10 +719,31 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
                 model_label = os.path.splitext(os.path.basename(mp))[0]
         except Exception:
             pass
-    model_label = model_label or "<unknown-model>"
+    if not model_label:
+        _safe_print(f"  {RED if color else ''}Could not identify the model "
+                    f"this vector belongs to. Pass the registry model name "
+                    f"explicitly.{RESET if color else ''}")
+        return 1
+    marker_path = vpath + ".model"
+    try:
+        with open(marker_path) as marker_file:
+            marked_model = marker_file.read().strip()
+    except OSError:
+        marked_model = ""
+    if not marked_model:
+        _safe_print(f"  {RED if color else ''}Missing model marker at "
+                    f"{marker_path}. Rebuild with `atlas asa build` before "
+                    f"publishing.{RESET if color else ''}")
+        return 1
+    if (_canonical_model_identity(marked_model)
+            != _canonical_model_identity(model_label)):
+        _safe_print(f"  {RED if color else ''}Vector marker says "
+                    f"{marked_model!r}, but publish target is "
+                    f"{model_label!r}. Refusing to mislabel the artifact."
+                    f"{RESET if color else ''}")
+        return 1
     base_model = (matched.model_display if matched else
-                  (model_label if model_label != "<unknown-model>"
-                   else "<unknown base model>"))
+                  model_label)
     license_id = args.license or "apache-2.0"
 
     hf_repo = args.repo or f"<your-hf-username>/atlas-asa-{model_label.lower()}"
@@ -751,10 +854,10 @@ def main(argv=None):
     p_build.add_argument("model", nargs="?", default=None,
         help="registry name (default: whatever llama-server has loaded)")
     p_build.add_argument("--pairs", default=None,
-        help="contrast pairs JSONL (default: "
-             "geometric-lens/asa_calibration/contrast_pairs.jsonl)")
-    p_build.add_argument("--layer", type=int, default=27,
-        help="layer to extract residuals from (default 27 = ~75%% of Qwen3.5-9B's 36)")
+        help="contrast pairs JSONL (default: generate "
+             "geometric-lens/asa_calibration/contrast_pairs.jsonl on demand)")
+    p_build.add_argument("--layer", type=int, default=None,
+        help="layer to extract residuals from (default: 75%% of loaded model depth)")
     p_build.add_argument("--limit", type=int, default=0,
         help="cap pairs processed for smoke tests (0 = all)")
     p_build.add_argument("--container", default=None,
@@ -777,8 +880,8 @@ def main(argv=None):
         help="path to the .gguf (default: ATLAS_CONTROL_VECTOR)")
     p_pub.add_argument("--license", default="apache-2.0",
         help="SPDX license id")
-    p_pub.add_argument("--layer", type=int, default=27,
-        help="layer the vector was trained at (recorded in PR body)")
+    p_pub.add_argument("--layer", type=int, default=None,
+        help="layer the vector was trained at (default: read from vector metadata)")
     p_pub.add_argument("--dry-run", action="store_true",
         help="don't upload, don't open PR")
     p_pub.add_argument("--skip-pr", action="store_true",

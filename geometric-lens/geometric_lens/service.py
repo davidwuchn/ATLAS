@@ -23,38 +23,114 @@ _gx_pca_mean = None        # PCA mean vector, numpy (hidden_dim,)
 _gx_top_dims = None        # Top contributing PCA dimensions
 _models_loaded = False
 _load_attempted = False
+_artifact_model_identity = None
+_model_identity_error = ""
+
+# C(x) energy scales are learned, not universal. The selected model's Lens
+# artifact must provide its own sigmoid calibration. Without one, raw energy is
+# still useful telemetry but the normalized value stays neutral (0.5).
+_cx_normalization = None
 
 # Per-model lens operating thresholds. These travel WITH the lens artifact
 # (gx_thresholds.json in the model's lens dir) because the G(x) score scale is
 # model-specific: a 0.3 off-rails cutoff that fits one model's distribution is
-# wrong for another's (e.g. a model whose grounded writes cluster at 0.4-0.55
-# never crosses 0.3, so the intervention never fires). The hardcoded values
-# here are the fallback for any lens published before thresholds were bundled.
+# wrong for another. Missing calibration leaves threshold-based interventions
+# disabled; raw scores remain available as telemetry.
 #   off_rails — per-token gx below this marks the first "stop generating" idx
 #   low       — aggregate gx_min below this is a low-quality write (proxy)
 #   severe    — aggregate gx_min below this is bad enough to act on one sample
-_gx_thresholds = {"off_rails": 0.3, "low": 0.15, "severe": 0.05}
+_gx_thresholds = None
+
+
+def _verify_model_identity(models_dir: str) -> bool:
+    """Require Lens artifacts to identify the selected runtime model."""
+    global _artifact_model_identity, _model_identity_error
+    _artifact_model_identity = None
+    _model_identity_error = ""
+    selected_model = os.environ.get("ATLAS_MODEL_NAME", "").strip()
+    if not selected_model:
+        _model_identity_error = "ATLAS_MODEL_NAME is unset"
+        logger.error("Lens artifact identity check failed: %s",
+                     _model_identity_error)
+        return False
+    try:
+        from geometric_lens.identity import (
+            identity_matches,
+            load_model_identity,
+        )
+        identity = load_model_identity(models_dir)
+        if not identity_matches(identity, selected_model):
+            raise ValueError(
+                f"artifacts are for {identity['model']!r}, selected model is "
+                f"{selected_model!r}"
+            )
+        _artifact_model_identity = identity
+        return True
+    except Exception as exc:
+        _model_identity_error = str(exc)
+        logger.error("Lens artifact identity check failed: %s", exc)
+        return False
+
+
+def _load_cx_normalization(models_dir: str) -> None:
+    """Load the selected model's C(x) energy calibration."""
+    global _cx_normalization
+    _cx_normalization = None
+    import json as _json
+    from geometric_lens.calibration import validate_cx_normalization
+    path = os.path.join(models_dir, "cx_normalization.json")
+    if not os.path.exists(path):
+        logger.warning("No cx_normalization.json — C(x) normalized scores are neutral")
+        return
+    try:
+        with open(path) as fh:
+            _cx_normalization = validate_cx_normalization(_json.load(fh))
+        logger.info("Loaded per-model C(x) calibration from %s: %s",
+                    path, _cx_normalization)
+    except Exception as e:
+        _cx_normalization = None
+        logger.warning("cx_normalization.json load failed (%s) — C(x) normalized scores are neutral", e)
+
+
+def _normalize_cx_energy(energy: float) -> float:
+    from geometric_lens.calibration import normalize_cx_energy
+    return normalize_cx_energy(energy, _cx_normalization)
+
+
+def _gx_verdict(score: float) -> str:
+    """Classify a G(x) score only when this model has calibration."""
+    if _gx_thresholds is None:
+        return "uncalibrated"
+    if score < _gx_thresholds["severe"]:
+        return "likely_incorrect"
+    if score < _gx_thresholds["low"]:
+        return "uncertain"
+    return "likely_correct"
 
 
 def _load_gx_thresholds(models_dir: str) -> None:
-    """Load per-model operating thresholds from gx_thresholds.json if present,
-    overlaying the defaults. Missing file / missing keys keep the defaults, so
-    a lens that predates bundled thresholds still scores (with the old fixed
-    cutoffs) instead of breaking."""
+    """Load calibrated operating thresholds for the selected model.
+
+    Missing or invalid calibration keeps scoring available but disables
+    threshold-based verdicts/interventions. Borrowing another model's cutoffs
+    would be a silent correctness failure.
+    """
+    global _gx_thresholds
+    _gx_thresholds = None
     import json as _json
+    from geometric_lens.thresholds import validate_gx_thresholds
     path = os.path.join(models_dir, "gx_thresholds.json")
     if not os.path.exists(path):
-        logger.info("No gx_thresholds.json — using default lens thresholds %s", _gx_thresholds)
+        logger.warning("No gx_thresholds.json — Lens scores are uncalibrated; threshold interventions disabled")
         return
     try:
         with open(path) as fh:
             loaded = _json.load(fh)
-        for k in ("off_rails", "low", "severe"):
-            if k in loaded and isinstance(loaded[k], (int, float)):
-                _gx_thresholds[k] = float(loaded[k])
+        _gx_thresholds = validate_gx_thresholds(loaded)
         logger.info("Loaded per-model lens thresholds from %s: %s", path, _gx_thresholds)
     except Exception as e:
-        logger.warning("gx_thresholds.json load failed (%s) — using defaults %s", e, _gx_thresholds)
+        _gx_thresholds = None
+        logger.warning("gx_thresholds.json load failed (%s) — threshold interventions disabled", e)
 
 
 def is_enabled() -> bool:
@@ -106,7 +182,11 @@ def _ensure_models_loaded():
             logger.warning(f"Geometric Lens model files not found in {models_dir}")
             return False
 
-        # Per-model operating thresholds ship alongside the lens artifact.
+        if not _verify_model_identity(models_dir):
+            return False
+
+        # Per-model calibration ships alongside the lens artifact.
+        _load_cx_normalization(models_dir)
         _load_gx_thresholds(models_dir)
 
         sd = torch.load(cost_path, map_location="cpu", weights_only=True)
@@ -195,6 +275,8 @@ def reload_weights(model_dir: str = None) -> dict:
     """
     global _cost_field, _metric_tensor, _gx_xgboost, _gx_pca_components
     global _gx_pca_mean, _gx_top_dims, _models_loaded, _load_attempted
+    global _cx_normalization, _gx_thresholds
+    global _artifact_model_identity, _model_identity_error
 
     _models_loaded = False
     _load_attempted = False
@@ -204,11 +286,19 @@ def reload_weights(model_dir: str = None) -> dict:
     _gx_pca_components = None
     _gx_pca_mean = None
     _gx_top_dims = None
+    _cx_normalization = None
+    _gx_thresholds = None
+    _artifact_model_identity = None
+    _model_identity_error = ""
 
     if model_dir:
         try:
             from geometric_lens.training import load_cost_field
+            if not _verify_model_identity(model_dir):
+                raise ValueError(_model_identity_error)
             _cost_field = load_cost_field(model_dir)
+            _load_cx_normalization(model_dir)
+            _load_gx_thresholds(model_dir)
             _models_loaded = True
             _load_attempted = True
             logger.info(f"Geometric Lens C(x) reloaded from {model_dir}")
@@ -257,9 +347,7 @@ def get_geometric_energy(query: str) -> float:
 
         elapsed_ms = (time.monotonic() - start) * 1000
 
-        # Normalize energy to [0, 1] using sigmoid-like scaling
-        # Qwen3.5-9B C(x) retrained: PASS ~13.2, FAIL ~24.9, midpoint ~19.0
-        normalized = 1.0 / (1.0 + 2.718 ** (-(energy - 19.0) / 2.0))
+        normalized = _normalize_cx_energy(energy)
 
         logger.debug(
             f"Geometric energy: raw={energy:.2f} normalized={normalized:.3f} "
@@ -292,8 +380,7 @@ def evaluate_energy(query: str) -> Tuple[float, float]:
         with torch.no_grad():
             energy = _cost_field(x).item()
 
-        normalized = 1.0 / (1.0 + 2.718 ** (-(energy - 19.0) / 2.0))
-        normalized = min(1.0, max(0.0, normalized))
+        normalized = _normalize_cx_energy(energy)
 
         return (energy, normalized)
 
@@ -305,7 +392,12 @@ def evaluate_energy(query: str) -> Tuple[float, float]:
 def get_model_info() -> dict:
     """Get info about loaded models for health/status endpoints."""
     if not _models_loaded:
-        return {"loaded": False, "enabled": is_enabled()}
+        return {
+            "loaded": False,
+            "enabled": is_enabled(),
+            "artifact_model": (_artifact_model_identity or {}).get("model"),
+            "error": _model_identity_error or None,
+        }
 
     cost_params = sum(p.numel() for p in _cost_field.parameters())
 
@@ -314,7 +406,12 @@ def get_model_info() -> dict:
         "enabled": is_enabled(),
         "cost_field_params": cost_params,
         "device": "cpu",
+        "cx_calibrated": _cx_normalization is not None,
         "gx_loaded": _metric_tensor is not None or _gx_xgboost is not None,
+        "gx_calibrated": _gx_thresholds is not None,
+        "gx_thresholds": (dict(_gx_thresholds)
+                          if _gx_thresholds is not None else None),
+        "artifact_model": (_artifact_model_identity or {}).get("model"),
         "gx_type": "xgboost" if _gx_xgboost is not None else (
             "metric_tensor" if _metric_tensor is not None else "none"
         ),
@@ -362,8 +459,7 @@ def evaluate_correctability(query: str) -> Tuple[float, float, float]:
         # C(x) energy
         with torch.no_grad():
             energy = _cost_field(x).item()
-        normalized = 1.0 / (1.0 + 2.718 ** (-(energy - 19.0) / 2.0))
-        normalized = min(1.0, max(0.0, normalized))
+        normalized = _normalize_cx_energy(energy)
 
         # G(x) correctability
         corr = compute_correctability(x, _cost_field, _metric_tensor)
@@ -409,12 +505,7 @@ def evaluate_gx(query: str) -> dict:
         proba = _gx_xgboost.predict_proba(x_pca)[0]
         gx_score = float(proba[1])  # probability of PASS class
 
-        if gx_score >= 0.7:
-            verdict = "likely_correct"
-        elif gx_score >= 0.3:
-            verdict = "uncertain"
-        else:
-            verdict = "likely_incorrect"
+        verdict = _gx_verdict(gx_score)
 
         elapsed_ms = (time.monotonic() - start) * 1000
         logger.debug(f"G(x) score: {gx_score:.4f} ({verdict}), latency={elapsed_ms:.1f}ms")
@@ -441,6 +532,7 @@ def evaluate_combined(query: str) -> dict:
     if not is_enabled() or not _ensure_models_loaded():
         return {
             "cx_energy": 0.0, "cx_normalized": 0.5,
+            "cx_calibrated": False,
             "gx_score": 0.5, "verdict": "unavailable",
             "enabled": False, "gx_available": False,
         }
@@ -459,8 +551,7 @@ def evaluate_combined(query: str) -> dict:
         x = torch.tensor(emb, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
             energy = _cost_field(x).item()
-        normalized = 1.0 / (1.0 + 2.718 ** (-(energy - 19.0) / 2.0))
-        normalized = min(1.0, max(0.0, normalized))
+        normalized = _normalize_cx_energy(energy)
 
         # G(x) evaluation (if available)
         gx_score = 0.5
@@ -474,12 +565,7 @@ def evaluate_combined(query: str) -> dict:
             gx_score = float(proba[1])
             gx_available = True
 
-            if gx_score >= 0.7:
-                verdict = "likely_correct"
-            elif gx_score >= 0.3:
-                verdict = "uncertain"
-            else:
-                verdict = "likely_incorrect"
+            verdict = _gx_verdict(gx_score)
 
         elapsed_ms = (time.monotonic() - start) * 1000
         logger.debug(
@@ -490,6 +576,7 @@ def evaluate_combined(query: str) -> dict:
         return {
             "cx_energy": energy,
             "cx_normalized": normalized,
+            "cx_calibrated": _cx_normalization is not None,
             "gx_score": gx_score,
             "verdict": verdict,
             "gx_available": gx_available,
@@ -501,6 +588,7 @@ def evaluate_combined(query: str) -> dict:
         logger.error(f"Combined evaluation failed: {e}")
         return {
             "cx_energy": 0.0, "cx_normalized": 0.5,
+            "cx_calibrated": False,
             "gx_score": 0.5, "verdict": "error",
             "enabled": True, "gx_available": False, "error": str(e),
         }
@@ -566,9 +654,13 @@ def evaluate_per_step(query: str, layer: Optional[int] = None) -> dict:
         x = torch.tensor(per_token_vecs, dtype=torch.float32)
         with torch.no_grad():
             cx_raw = _cost_field(x).squeeze(-1).cpu().numpy()  # (n_tokens,)
-        # logistic normalization, same constants used by evaluate_combined
-        cx_norm = 1.0 / (1.0 + np.exp(-(cx_raw - 19.0) / 2.0))
-        cx_norm = np.clip(cx_norm, 0.0, 1.0)
+        if _cx_normalization is None:
+            cx_norm = np.full(n_tokens, 0.5, dtype=float)
+        else:
+            midpoint = _cx_normalization["midpoint"]
+            steepness = _cx_normalization["steepness"]
+            z = np.clip(steepness * (cx_raw - midpoint), -709.0, 709.0)
+            cx_norm = 1.0 / (1.0 + np.exp(-z))
 
         # Batched G(x) when XGBoost is loaded
         gx_available = _gx_xgboost is not None and _gx_pca_components is not None
@@ -583,13 +675,15 @@ def evaluate_per_step(query: str, layer: Optional[int] = None) -> dict:
         per_step = []
         for i in range(n_tokens):
             score = float(gx_scores[i])
-            if gx_available:
-                if score >= 0.7:
-                    verdict = "likely_correct"
-                elif score >= 0.3:
+            if gx_available and _gx_thresholds is not None:
+                if score < _gx_thresholds["severe"]:
+                    verdict = "likely_incorrect"
+                elif score < _gx_thresholds["low"]:
                     verdict = "uncertain"
                 else:
-                    verdict = "likely_incorrect"
+                    verdict = "likely_correct"
+            elif gx_available:
+                verdict = "uncalibrated"
             else:
                 verdict = "unavailable"
             per_step.append({
@@ -612,7 +706,7 @@ def evaluate_per_step(query: str, layer: Optional[int] = None) -> dict:
             "gx_score_mean":  float(gx_scores.mean()),
             # token index where the lens first sees a low-quality state —
             # the natural "stop generating" signal for PC-207 callers.
-            "first_off_rails_idx": int(np.argmax(gx_scores < _gx_thresholds["off_rails"])) if gx_available and (gx_scores < _gx_thresholds["off_rails"]).any() else -1,
+            "first_off_rails_idx": int(np.argmax(gx_scores < _gx_thresholds["off_rails"])) if gx_available and _gx_thresholds is not None and (gx_scores < _gx_thresholds["off_rails"]).any() else -1,
         }
 
         elapsed_ms = (time.monotonic() - start) * 1000
@@ -628,6 +722,7 @@ def evaluate_per_step(query: str, layer: Optional[int] = None) -> dict:
         return {
             "enabled":      True,
             "gx_available": gx_available,
+            "cx_calibrated": _cx_normalization is not None,
             "per_step":     per_step,
             "aggregate":    aggregate,
             "n_tokens":     n_tokens,
@@ -638,7 +733,7 @@ def evaluate_per_step(query: str, layer: Optional[int] = None) -> dict:
             # uses these for its run-of-N / severe regression checks instead of
             # its own hardcoded constants, so the whole intervention chain is
             # calibrated to the loaded model's score scale.
-            "thresholds":   dict(_gx_thresholds),
+            "thresholds":   dict(_gx_thresholds) if _gx_thresholds is not None else None,
         }
 
     except Exception as e:

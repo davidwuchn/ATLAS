@@ -194,7 +194,7 @@ def _names_match(loaded: Optional[str], model_file: str) -> bool:
     `model_file`. Compares the basename with ONLY a trailing `.gguf` stripped
     (so `.gguf`-vs-bare-name and full-path forms match), using EQUALITY — never
     substring containment, and never rsplit-on-'.' which would mangle dotted
-    names like `Qwen3.5-9B-Q6_K` into `Qwen3`."""
+    names like `family-variant-Q4_K_M` into `family`."""
     if not loaded:
         return False
 

@@ -186,7 +186,7 @@ Qwen3.5-9B는 ast_edit가 옳은 경우에도 `ast_edit`보다 `edit_file`을
 4. **ASA 스티어링 벡터**(`geometric-lens/asa_calibration/`).
    활성화 스티어링이 residual-stream 분포를 상류에서 이동시켜, 어떤
    거부도 발생하기 전인 첫 시도 결정에서도 ast_edit가 선호되도록 합니다.
-   파일이 존재하면 `inference/entrypoint-v3.1-9b.sh`가
+   파일이 존재하면 `inference/entrypoint-v3.1.sh`가
    `/models/ast_edit_steering.gguf`에서 자동 로드합니다 — 운영자가
    `geometric-lens/asa_calibration/README.md`의 워크플로를 통해 벡터를
    빌드해 배치하면 항상 켜져 있습니다. `ATLAS_CONTROL_VECTOR*` 환경
@@ -717,7 +717,7 @@ Apple Silicon에서는 `atlas init`가 Docker-GPU 경로 대신 `ATLAS_BACKEND=m
 
 ### 8.5 K3s
 
-`templates/*.yaml.tmpl`의 매니페스트는 `scripts/generate-manifests.sh`(또는 `install.sh`의 `process_templates` 단계)가 `atlas.conf`에 대해 `envsubst`를 사용해 `manifests/*.yaml`로 렌더링합니다. 서비스는 `atlas` 네임스페이스에 Pod로 배포되고, 외부 접근은 NodePort(`ATLAS_PROXY_NODEPORT`, `ATLAS_LLAMA_NODEPORT`, `ATLAS_LENS_NODEPORT`, `ATLAS_SANDBOX_NODEPORT`, `ATLAS_V3_NODEPORT`)를 통합니다. K3s 엔트리포인트는 Docker Compose에서 쓰는 것과 동일한 `inference/entrypoint-v3.1-9b.sh`입니다 — 컨텍스트 크기, KV 캐시 양자화, flash attention, mlock이 모두 환경 변수(`ATLAS_CONTEXT_LENGTH`, `ATLAS_FLASH_ATTENTION` 등)로 구동되므로 배포 모드 전반에서 동작이 동일합니다. 프록시와 샌드박스 Pod는 둘 다 `${ATLAS_PROJECTS_DIR}`를 `/workspace`에 `hostPath`-마운트하여 에이전트의 도구 호출이 두 Pod에서 같은 파일을 보게 합니다.
+`templates/*.yaml.tmpl`의 매니페스트는 `scripts/generate-manifests.sh`(또는 `install.sh`의 `process_templates` 단계)가 `atlas.conf`에 대해 `envsubst`를 사용해 `manifests/*.yaml`로 렌더링합니다. 서비스는 `atlas` 네임스페이스에 Pod로 배포되고, 외부 접근은 NodePort(`ATLAS_PROXY_NODEPORT`, `ATLAS_LLAMA_NODEPORT`, `ATLAS_LENS_NODEPORT`, `ATLAS_SANDBOX_NODEPORT`, `ATLAS_V3_NODEPORT`)를 통합니다. K3s 엔트리포인트는 Docker Compose에서 쓰는 것과 동일한 `inference/entrypoint-v3.1.sh`입니다 — 컨텍스트 크기, KV 캐시 양자화, flash attention, mlock이 모두 환경 변수(`ATLAS_CONTEXT_LENGTH`, `ATLAS_FLASH_ATTENTION` 등)로 구동되므로 배포 모드 전반에서 동작이 동일합니다. 프록시와 샌드박스 Pod는 둘 다 `${ATLAS_PROJECTS_DIR}`를 `/workspace`에 `hostPath`-마운트하여 에이전트의 도구 호출이 두 Pod에서 같은 파일을 보게 합니다.
 
 `scripts/deploy-9b.sh`는 적절한 환경 변수 설정과 함께 어느 이미지든 배포하기 위해 `--backend cuda|rocm`(또는 `ATLAS_BACKEND` 환경)을 받습니다. ROCm K8s Pod는 추가로 `/dev/kfd` + `/dev/dri` hostPath 마운트와 Pod 스펙의 `render`/`video` 그룹 멤버십이 필요합니다 — 이를 위한 매니페스트 템플릿은 V3.1.2 작업입니다; 환경 변수 패치만으로는 동작하는 ROCm K3s 배포에 충분하지 않습니다.
 

@@ -8,7 +8,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-V3.1.0-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"/>
-  <img src="https://img.shields.io/badge/model-Qwen3.5--9B-green" alt="Model"/>
+  <img src="https://img.shields.io/badge/model-agnostic-green" alt="模型无关"/>
 </p>
 
 <h1 align="center">A.T.L.A.S.</h1>
@@ -59,7 +59,7 @@ ATLAS 是一个跑在你自己 GPU 上的编程助手。你把它指向一个项
    - [Derivation Chains](../../reports/V3_ABLATION_STUDY.md#derivation-chains-0-rescues) - 针对难题的多步推理
 
 4. **[Geometric Lens](../../ARCHITECTURE.md#5-geometric-lens)** - 基于模型自身嵌入的能量打分，无需外部预言机。（[什么是 "Geometric Lens"？](../../ARCHITECTURE.md#why-geometric-lens)）
-   - [C(x) Cost Field](../../ARCHITECTURE.md#scoring-models) - 4096→512→128→1 的 MLP，用于评估候选质量
+   - [C(x) Cost Field](../../ARCHITECTURE.md#scoring-models) - hidden-dim→512→128→1 的 MLP，用于评估候选质量
    - [G(x) Quality Prediction](../../ARCHITECTURE.md#scoring-models) - 用于候选选择的 XGBoost 集成
    - [RAG / PageIndex V2](../../ARCHITECTURE.md#rag--pageindex-v2) - 感知 AST 的代码检索与项目索引
    - [Confidence Router](../../ARCHITECTURE.md#confidence-router--pattern-cache) - Thompson Sampling 把算力集中到真正需要的候选

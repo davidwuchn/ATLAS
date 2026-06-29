@@ -62,17 +62,19 @@ stacked PRs).
 
 ## Publishing a Lens artifact
 
-Assumes you've already run `atlas lens build --samples your-data.json` and have a `cost_field.pt` in the artifact dir. If not, see the `atlas lens build` section in [CLI.md](CLI.md).
+Assumes you've already run `atlas lens build --samples your-data.json` and
+have the C(x), G(x), model identity, and per-model calibration files in the artifact directory.
+If not, see the `atlas lens build` section in [CLI.md](CLI.md).
 
 ```bash
 # Preview the PR body without uploading anything
-atlas lens publish Qwen3.5-9B-Q6_K \
-    --repo your-username/atlas-lens-qwen35-9b \
+atlas lens publish <model-name> \
+    --repo your-username/atlas-lens-model-name \
     --dry-run
 
 # Real upload + open the registry PR
-atlas lens publish Qwen3.5-9B-Q6_K \
-    --repo your-username/atlas-lens-qwen35-9b
+atlas lens publish <model-name> \
+    --repo your-username/atlas-lens-model-name
 ```
 
 The `--repo` flag is the HuggingFace destination (created if it doesn't exist). Naming convention: `atlas-lens-<model-slug>` keeps it discoverable.
@@ -81,7 +83,7 @@ The `--repo` flag is the HuggingFace destination (created if it doesn't exist). 
 
 1. **Pre-flight** — checks `HF_TOKEN` is set, artifact file exists, and that `cost_field.pt` is actually a torch checkpoint (not a half-finished download).
 2. **Hash** — SHA-256s the artifact so the PR has a tamper-detectable fingerprint.
-3. **Upload to HF** — creates the repo (idempotent), uploads `cost_field.pt`, uploads `metric_tensor.pt` if you have one, generates a model card README with license + base-model badge.
+3. **Upload to HF** — creates the repo (idempotent), uploads C(x), G(x), `model_identity.json`, `cx_normalization.json`, and `gx_thresholds.json`, then generates a model card README with license + base-model badge.
 4. **Render PR body** — produces a markdown checklist with the HF URL, SHA-256, input dim, license, and a suggested Python diff for `atlas/cli/commands/model_registry.py`.
 5. **Open the PR** — if `gh` is installed and authed, the PR is built through the GitHub API: a branch is created (on your automatic fork if you can't push upstream), a real registry edit is committed — a complete `Model(...)` entry with `lens_status="supported"` and your HF repo recorded — and the PR opens against the `dev` branch. No local git checkout is needed; this works from any install. If the model is already registered upstream, or `gh` is unavailable, the body is printed for manual paste into https://github.com/itigges22/ATLAS/compare instead.
 
@@ -103,12 +105,12 @@ The `--repo` flag is the HuggingFace destination (created if it doesn't exist). 
 Same shape, different artifact. Assumes you've trained a vector with `atlas asa build` (see [CLI.md](CLI.md) for the training walkthrough).
 
 ```bash
-atlas asa publish Qwen3.5-9B-Q6_K \
-    --repo your-username/atlas-asa-qwen35-9b \
+atlas asa publish <model-name> \
+    --repo your-username/atlas-asa-model-name \
     --dry-run
 
-atlas asa publish Qwen3.5-9B-Q6_K \
-    --repo your-username/atlas-asa-qwen35-9b
+atlas asa publish <model-name> \
+    --repo your-username/atlas-asa-model-name
 ```
 
 The publish flow:

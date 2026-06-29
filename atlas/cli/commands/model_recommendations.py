@@ -12,7 +12,7 @@ three names that PC-055.2 callers import:
 
     from atlas.cli.commands import model_recommendations
     rec = model_recommendations.for_tier("medium")
-    tname = model_recommendations.tier_for_model("Qwen3.5-9B-Q6_K.gguf")
+    tname = model_recommendations.tier_for_model("selected-model.gguf")
     # ModelRecommendation is now an alias for Model (superset of fields)
 
 If you're adding a new caller, prefer importing `model_registry`

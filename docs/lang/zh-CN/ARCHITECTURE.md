@@ -183,7 +183,7 @@ Qwen3.5-9B 有一个有据可查的偏差：即便 ast_edit 才是正确选择�
 4. **ASA 操控向量**（`geometric-lens/asa_calibration/`）。
    激活操控会在上游移动残差流分布，
    因此即使在任何拒绝触发之前的首次尝试决策中，也会偏好 ast_edit。
-   若 `/models/ast_edit_steering.gguf` 文件存在，便由 `inference/entrypoint-v3.1-9b.sh`
+   若 `/models/ast_edit_steering.gguf` 文件存在，便由 `inference/entrypoint-v3.1.sh`
    自动加载 —— 一旦运维人员通过 `geometric-lens/asa_calibration/README.md`
    中的工作流构建并放入该向量，它就始终生效。
    可通过 `ATLAS_CONTROL_VECTOR*` 环境变量覆盖路径/缩放/层范围。
@@ -714,7 +714,7 @@ macOS 无法把 GPU 直通给 Docker 容器，因此 llama-server 无法在 Dock
 
 ### 8.5 K3s
 
-`templates/*.yaml.tmpl` 中的清单由 `scripts/generate-manifests.sh`（或 `install.sh` 的 `process_templates` 步骤）使用 `envsubst` 对照 `atlas.conf` 渲染为 `manifests/*.yaml`。各服务作为 Pod 部署在 `atlas` 命名空间；外部访问通过 NodePort（`ATLAS_PROXY_NODEPORT`、`ATLAS_LLAMA_NODEPORT`、`ATLAS_LENS_NODEPORT`、`ATLAS_SANDBOX_NODEPORT`、`ATLAS_V3_NODEPORT`）。K3s 入口点与 Docker Compose 下使用的 `inference/entrypoint-v3.1-9b.sh` 相同 —— 上下文大小、KV 缓存量化、flash attention 和 mlock 都由环境变量（`ATLAS_CONTEXT_LENGTH`、`ATLAS_FLASH_ATTENTION` 等）驱动，因此跨部署模式行为一致。proxy 和 sandbox Pod 都把 `${ATLAS_PROJECTS_DIR}` 以 `hostPath` 挂载到 `/workspace`，使 agent 的工具调用在两个 Pod 中看到相同的文件。
+`templates/*.yaml.tmpl` 中的清单由 `scripts/generate-manifests.sh`（或 `install.sh` 的 `process_templates` 步骤）使用 `envsubst` 对照 `atlas.conf` 渲染为 `manifests/*.yaml`。各服务作为 Pod 部署在 `atlas` 命名空间；外部访问通过 NodePort（`ATLAS_PROXY_NODEPORT`、`ATLAS_LLAMA_NODEPORT`、`ATLAS_LENS_NODEPORT`、`ATLAS_SANDBOX_NODEPORT`、`ATLAS_V3_NODEPORT`）。K3s 入口点与 Docker Compose 下使用的 `inference/entrypoint-v3.1.sh` 相同 —— 上下文大小、KV 缓存量化、flash attention 和 mlock 都由环境变量（`ATLAS_CONTEXT_LENGTH`、`ATLAS_FLASH_ATTENTION` 等）驱动，因此跨部署模式行为一致。proxy 和 sandbox Pod 都把 `${ATLAS_PROJECTS_DIR}` 以 `hostPath` 挂载到 `/workspace`，使 agent 的工具调用在两个 Pod 中看到相同的文件。
 
 `scripts/deploy-9b.sh` 接受 `--backend cuda|rocm`（或 `ATLAS_BACKEND` 环境变量）来部署设置了相应环境变量的任一镜像。ROCm K8s pod 还额外需要 `/dev/kfd` + `/dev/dri` hostPath 挂载，以及在其 Pod 规格中的 `render`/`video` 组成员身份 —— 这方面的清单模板是 V3.1.2 的工作；仅靠环境变量补丁不足以构成一个可工作的 ROCm K3s 部署。
 

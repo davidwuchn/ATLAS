@@ -21,7 +21,7 @@ some level of running infrastructure for their richer probes).
 
 Invoke:
     atlas lens check                    # probe currently-loaded model
-    atlas lens check Qwen3.5-9B-Q6_K    # probe a registry entry
+    atlas lens check <model-name>       # probe a registry entry
     atlas lens check /path/to/model.gguf  # probe an arbitrary file
     atlas lens build <name|path>        # train fresh C(x) artifacts
     atlas lens --json                   # machine-readable output for scripts
@@ -36,6 +36,7 @@ import argparse
 import json as jsonlib
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -73,12 +74,6 @@ def _safe_print(s: str = "") -> None:
 # ---------------------------------------------------------------------------
 # llama-server probe helpers
 # ---------------------------------------------------------------------------
-
-# C(x) constructor permits arbitrary input_dim; what's "compat" is whether
-# the saved artifact's first-layer weight matches the model's embedding dim.
-# Keeping a canonical value documents the V3.1.0 baseline.
-LENS_CANONICAL_DIM = 4096  # Qwen3.5-9B hidden size
-
 
 def _llama_url() -> str:
     """Resolve where llama-server is listening.
@@ -192,7 +187,7 @@ def probe_llama(url: Optional[str] = None,
         probe.error = (f"llama-server at {url} is up but /embedding "
                        f"didn't return an embedding. Likely cause: model "
                        f"was started without `--embeddings`. Check "
-                       f"inference/entrypoint-v3.1-9b.sh.")
+                       f"inference/entrypoint-v3.1.sh.")
     return probe
 
 
@@ -204,7 +199,7 @@ def _resolve_model_arg(arg: Optional[str]) -> Optional[model_registry.Model]:
     """Best-effort lookup: registry name → Model, or path/None → None.
 
     `atlas lens check` accepts:
-      - a registry name        (e.g. "Qwen3.5-9B-Q6_K")
+      - a registry name        (e.g. "your-model-Q4_K_M")
       - a .gguf path           (any model on disk)
       - nothing                (probe whatever llama-server has loaded)
     """
@@ -214,6 +209,15 @@ def _resolve_model_arg(arg: Optional[str]) -> Optional[model_registry.Model]:
         if m.name == arg or m.model_file == os.path.basename(arg):
             return m
     return None
+
+
+def _canonical_model_identity(value: Optional[str]) -> str:
+    """Normalize registry names, GGUF filenames, and model paths."""
+    text = str(value or "").strip().replace("\\", "/")
+    name = text.rsplit("/", 1)[-1]
+    if name.lower().endswith(".gguf"):
+        name = name[:-5]
+    return name.casefold()
 
 
 @dataclass
@@ -276,6 +280,67 @@ def _read_saved_cost_field_dim(artifact_dir: str) -> Optional[int]:
     return _inspect_cost_field(artifact_dir).dim
 
 
+def _missing_runtime_artifacts(artifact_dir: str) -> List[str]:
+    """Return files required for calibrated C(x)+G(x) operation."""
+    required = (
+        "model_identity.json",
+        "cx_normalization.json",
+        "gx_xgboost.json",
+        "gx_weights.json",
+        "gx_thresholds.json",
+    )
+    return [name for name in required
+            if not os.path.isfile(os.path.join(artifact_dir, name))]
+
+
+def _invalid_runtime_artifacts(artifact_dir: str,
+                               selected_model: str = "",
+                               embedding_dim: int = 0) -> List[str]:
+    """Return concise validation errors for present model-coupled metadata.
+
+    Existence alone is not enough: accepting ``{}``, booleans, NaN, or an
+    inverted threshold order would let publishing claim calibrated support
+    while the runtime quietly disables interventions.
+    """
+    gl_dir = os.path.join(_atlas_root(), "geometric-lens")
+    if gl_dir not in sys.path:
+        sys.path.insert(0, gl_dir)
+    try:
+        from geometric_lens.calibration import validate_cx_normalization
+        from geometric_lens.identity import (
+            identity_matches,
+            validate_model_identity,
+        )
+        from geometric_lens.thresholds import validate_gx_thresholds
+    except ImportError as exc:
+        return [f"calibration validators unavailable: {exc}"]
+
+    errors = []
+    validators = {
+        "model_identity.json": validate_model_identity,
+        "cx_normalization.json": validate_cx_normalization,
+        "gx_thresholds.json": validate_gx_thresholds,
+    }
+    for filename, validator in validators.items():
+        path = os.path.join(artifact_dir, filename)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as fh:
+                value = jsonlib.load(fh)
+            validated = validator(value)
+            if (filename == "model_identity.json" and selected_model
+                    and not identity_matches(validated, selected_model,
+                                             embedding_dim)):
+                errors.append(
+                    f"{filename}: artifact is for {validated['model']!r}, "
+                    f"not {selected_model!r} at {embedding_dim or 'unknown'}-dim"
+                )
+        except (OSError, ValueError, TypeError, jsonlib.JSONDecodeError) as exc:
+            errors.append(f"{filename}: {exc}")
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # atlas lens check  (PC-057)
 # ---------------------------------------------------------------------------
@@ -329,6 +394,18 @@ def _check_model(arg: Optional[str], atlas_root: str) -> CheckVerdict:
 
     matched = _resolve_model_arg(arg)
     matched_name = matched.name if matched else None
+    requested_model = (matched.name if matched else arg) or ""
+    if (requested_model and probe.model_name
+            and _canonical_model_identity(requested_model)
+            != _canonical_model_identity(probe.model_name)):
+        return CheckVerdict(
+            verdict="incompatible",
+            reason=(f"Requested model {requested_model!r}, but llama-server "
+                    f"has {probe.model_name!r} loaded. Start the requested "
+                    "model before checking or building its Lens artifacts."),
+            probe=probe,
+            matched_model=matched_name,
+        )
 
     # Resolve artifact dir. For known-supported registry entries this is
     # already wired; for arbitrary models we fall back to ATLAS_LENS_MODELS
@@ -359,6 +436,25 @@ def _check_model(arg: Optional[str], atlas_root: str) -> CheckVerdict:
         )
 
     if inspection.dim is None and not inspection.torch_available:
+        missing = _missing_runtime_artifacts(artifact_dir)
+        if missing:
+            return CheckVerdict(
+                verdict="needs-build",
+                reason=("Lens weights are incomplete or uncalibrated; missing "
+                        f"{', '.join(missing)}. Run `atlas lens build`."),
+                probe=probe, artifact_dir=artifact_dir,
+                artifact_dim=None, matched_model=matched_name,
+            )
+        invalid = _invalid_runtime_artifacts(
+            artifact_dir, probe.model_name, probe.embedding_dim)
+        if invalid:
+            return CheckVerdict(
+                verdict="needs-build",
+                reason=("Lens calibration is invalid: " + "; ".join(invalid)
+                        + ". Run `atlas lens build`."),
+                probe=probe, artifact_dir=artifact_dir,
+                artifact_dim=None, matched_model=matched_name,
+            )
         # Artifact exists but the host Python can't peek at its dim. Don't
         # send the user to needs-build over a tooling gap on the host —
         # the lens service in the container has its own torch and will
@@ -394,6 +490,28 @@ def _check_model(arg: Optional[str], atlas_root: str) -> CheckVerdict:
                     f"embeddings but the saved cost_field.pt expects "
                     f"{artifact_dim}-dim input. Run `atlas lens build` to "
                     f"train fresh artifacts at the model's native dim."),
+            probe=probe, artifact_dir=artifact_dir,
+            artifact_dim=artifact_dim, matched_model=matched_name,
+        )
+
+    missing = _missing_runtime_artifacts(artifact_dir)
+    if missing:
+        return CheckVerdict(
+            verdict="needs-build",
+            reason=("C(x) dimension matches, but calibrated Lens operation "
+                    f"requires {', '.join(missing)}. Run `atlas lens build` "
+                    "for the selected model."),
+            probe=probe, artifact_dir=artifact_dir,
+            artifact_dim=artifact_dim, matched_model=matched_name,
+        )
+    invalid = _invalid_runtime_artifacts(
+        artifact_dir, probe.model_name, probe.embedding_dim)
+    if invalid:
+        return CheckVerdict(
+            verdict="needs-build",
+            reason=("C(x)/G(x) calibration is invalid: "
+                    + "; ".join(invalid)
+                    + ". Run `atlas lens build` for the selected model."),
             probe=probe, artifact_dir=artifact_dir,
             artifact_dim=artifact_dim, matched_model=matched_name,
         )
@@ -656,6 +774,68 @@ def _load_training_samples(path: Optional[str]) -> List[Dict]:
     return []
 
 
+_MANAGED_LENS_ARTIFACTS = (
+    "cost_field.pt",
+    "cost_field.safetensors",
+    "cx_normalization.json",
+    "gx_xgboost.json",
+    "gx_weights.json",
+    "gx_thresholds.json",
+    "model_identity.json",
+    # Superseded formats must not shadow a freshly trained XGBoost bundle.
+    "metric_tensor.pt",
+    "gx_xgboost.pkl",
+)
+
+
+def _activate_lens_bundle(staging_dir: str, artifact_dir: str) -> None:
+    """Activate one complete Lens bundle, restoring the prior one on error."""
+    missing = _missing_runtime_artifacts(staging_dir)
+    if not os.path.isfile(os.path.join(staging_dir, "cost_field.pt")):
+        missing.insert(0, "cost_field.pt")
+    if missing:
+        raise ValueError("staged Lens bundle is incomplete: "
+                         + ", ".join(missing))
+    invalid = _invalid_runtime_artifacts(staging_dir)
+    if invalid:
+        raise ValueError("staged Lens bundle is invalid: " + "; ".join(invalid))
+
+    artifact_dir = os.path.abspath(artifact_dir)
+    os.makedirs(artifact_dir, exist_ok=True)
+    parent = os.path.dirname(artifact_dir)
+    backup_dir = tempfile.mkdtemp(prefix=".atlas-lens-backup-", dir=parent)
+    moved_new = []
+    try:
+        for filename in _MANAGED_LENS_ARTIFACTS:
+            current = os.path.join(artifact_dir, filename)
+            if os.path.exists(current):
+                os.replace(current, os.path.join(backup_dir, filename))
+
+        # Identity is the commit marker and moves last.
+        staged_files = [name for name in _MANAGED_LENS_ARTIFACTS
+                        if name != "model_identity.json"
+                        and os.path.isfile(os.path.join(staging_dir, name))]
+        staged_files.append("model_identity.json")
+        for filename in staged_files:
+            source = os.path.join(staging_dir, filename)
+            target = os.path.join(artifact_dir, filename)
+            os.replace(source, target)
+            moved_new.append(target)
+    except Exception:
+        for path in moved_new:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        for filename in os.listdir(backup_dir):
+            os.replace(os.path.join(backup_dir, filename),
+                       os.path.join(artifact_dir, filename))
+        raise
+    finally:
+        import shutil
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
 def _load_results_samples(results_dir: str) -> List[Dict]:
     """Load training samples from a benchmark results directory — the per-task
     JSONs written by `atlas bench` (each has `code` + `passed`). Maps to the
@@ -915,6 +1095,7 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
         if gl_dir not in sys.path:
             sys.path.insert(0, gl_dir)
         from geometric_lens.training import train_cost_field, save_cost_field
+        from geometric_lens.calibration import derive_cx_normalization
     except ImportError as e:
         _safe_print(f"  {RED if color else ''}Could not import training "
                     f"module: {e}.{RESET if color else ''}")
@@ -954,37 +1135,54 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
                         f"rate.{RESET if color else ''}")
 
     artifact_dir = args.artifact_dir or verdict.artifact_dir
-    os.makedirs(artifact_dir, exist_ok=True)
-    cost_path = save_cost_field(result["model"], save_dir=artifact_dir)
-    _safe_print(f"  Saved: {cost_path}")
+    artifact_parent = os.path.dirname(os.path.abspath(artifact_dir))
+    os.makedirs(artifact_parent, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+            prefix=".atlas-lens-build-", dir=artifact_parent) as staging_dir:
+        normalization = derive_cx_normalization(
+            result["pass_energy_mean"], result["fail_energy_mean"])
+        save_cost_field(result["model"], save_dir=staging_dir,
+                        normalization=normalization)
 
-    # 5. Train + save G(x) on the same embeddings. The lens scores with
-    # both halves — C(x) energy and the G(x) correctness classifier — and
-    # G(x)'s PCA projection is dimension-coupled to the model just like
-    # C(x), so a build that stopped here would leave G(x) serving the
-    # previous model's geometry (or erroring on the dim mismatch).
-    _safe_print(f"[5/5] Training G(x) XGBoost…")
-    try:
-        from geometric_lens.training import train_gx, save_gx
-        gx_result = train_gx(data)
-    except ImportError as e:
-        _safe_print(f"  {RED if color else ''}Could not import the G(x) "
-                    f"trainer: {e}.{RESET if color else ''}")
-        _safe_print("  G(x) training needs XGBoost + scikit-learn on the "
-                    "host:")
-        _safe_print("    pip install xgboost scikit-learn")
-        _safe_print("  C(x) is saved; embeddings are cached, so re-running "
-                    "this command after installing completes the build in "
-                    "seconds.")
-        return 1
-    except ValueError as e:
-        _safe_print(f"  {RED if color else ''}G(x) training skipped: "
-                    f"{e}{RESET if color else ''}")
-        _safe_print("  C(x) is saved. Add more bench samples and re-run "
-                    "(embeddings are cached).")
-        return 1
-    gx_path = save_gx(gx_result, save_dir=artifact_dir)
-    _safe_print(f"  Saved: {gx_path}")
+        # 5. Train + save G(x) on the same embeddings. Nothing reaches the
+        # live directory unless both halves and their metadata are complete.
+        _safe_print(f"[5/5] Training G(x) XGBoost…")
+        try:
+            from geometric_lens.training import train_gx, save_gx
+            gx_result = train_gx(data)
+        except ImportError as e:
+            _safe_print(f"  {RED if color else ''}Could not import the G(x) "
+                        f"trainer: {e}.{RESET if color else ''}")
+            _safe_print("  G(x) training needs XGBoost + scikit-learn on the "
+                        "host: pip install xgboost scikit-learn")
+            _safe_print("  The previous live bundle is unchanged; embeddings "
+                        "are cached for a quick retry.")
+            return 1
+        except ValueError as e:
+            _safe_print(f"  {RED if color else ''}G(x) training skipped: "
+                        f"{e}{RESET if color else ''}")
+            _safe_print("  The previous live bundle is unchanged. Add more "
+                        "bench samples and re-run.")
+            return 1
+        save_gx(gx_result, save_dir=staging_dir)
+        from geometric_lens.identity import save_model_identity
+        model_identity = (args.model or verdict.probe.model_name or "").strip()
+        if not model_identity:
+            _safe_print(f"  {RED if color else ''}Could not identify the loaded "
+                        f"model; refusing to activate these artifacts."
+                        f"{RESET if color else ''}")
+            return 1
+        save_model_identity(
+            staging_dir, model_identity, verdict.probe.embedding_dim)
+        try:
+            _activate_lens_bundle(staging_dir, artifact_dir)
+        except (OSError, ValueError) as e:
+            _safe_print(f"  {RED if color else ''}Could not activate the "
+                        f"complete Lens bundle: {e}. The previous bundle was "
+                        f"restored.{RESET if color else ''}")
+            return 1
+
+    _safe_print(f"  Activated: {artifact_dir}")
     _safe_print(f"  G(x) CV AUC: {gx_result['cv_auc_mean']:.4f}")
 
     _safe_print("")
@@ -1063,6 +1261,7 @@ def _render_registry_entry(model_label: str, model_file: str,
         model_display="{model_label}",
         model_size_gb={size_gb},
         lens_status="supported",
+        lens_calibrated=True,
         download_url=None,
         sha256=None,
         license="{license_id}",
@@ -1096,13 +1295,58 @@ def _registry_insert_entry(content: str, model_label: str,
     if close < 0:
         return None
     schema = content[:start]   # the Model dataclass definition lives above
-    for field_name in ("lens_hf_repo", "asa_hf_repo"):
+    for field_name in ("lens_calibrated", "lens_hf_repo", "asa_hf_repo"):
         if f"{field_name}:" not in schema:
             entry = "\n".join(l for l in entry.splitlines()
                               if not l.strip().startswith(f"{field_name}="))
             if not entry.endswith("\n"):
                 entry += "\n"
     return content[:close + 1] + entry + content[close + 1:]
+
+
+def _registry_set_lens(content: str, model_label: str, hf_repo: str,
+                       artifact_files: List[str]) -> Optional[str]:
+    """Mark an existing registry entry's Lens bundle as current.
+
+    Publishing is also the upgrade path for legacy or unverified entries, so
+    it must update those entries rather than only knowing how to insert a new
+    model. The upstream schema may lag behind the publisher; in that case the
+    download location is retained as a comment until the field lands.
+    """
+    import re
+    match = re.search(
+        rf'(    Model\(\s*\n\s*name="{re.escape(model_label)}".*?\n    \),)',
+        content,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+
+    block = match.group(1)
+    files = ", ".join(f'"{name}"' for name in artifact_files)
+    lens_lines = (
+        '        lens_status="supported",\n'
+        f'        lens_artifact_files=[{files}],\n'
+    )
+    schema = content[:match.start()]
+    if "lens_calibrated:" in schema:
+        lens_lines += '        lens_calibrated=True,\n'
+    else:
+        lens_lines += '        # Bundle includes current C(x)/G(x) calibration.\n'
+    if "lens_hf_repo:" in schema:
+        lens_lines += f'        lens_hf_repo="{hf_repo}",\n'
+    else:
+        lens_lines = (
+            f'        # Lens artifacts: https://huggingface.co/{hf_repo}\n'
+            '        # (promote to lens_hf_repo= once the registry schema carries it)\n'
+        ) + lens_lines
+
+    new_block = re.sub(r'\n\s*lens_status="[^"]*",', "", block)
+    new_block = re.sub(r'\n\s*lens_calibrated=(?:True|False),', "", new_block)
+    new_block = re.sub(r'\n\s*lens_artifact_files=\[[^\]]*\],', "", new_block)
+    new_block = re.sub(r'\n\s*lens_hf_repo="[^"]*",', "", new_block)
+    new_block = new_block.replace("\n    ),", "\n" + lens_lines + "    ),")
+    return content.replace(block, new_block)
 
 
 def _registry_set_asa(content: str, model_label: str, hf_repo: str,
@@ -1440,9 +1684,9 @@ base_model: {base_model}
 
 # ATLAS Geometric Lens artifacts for {model_name}
 
-Cost-field C(x) (and optionally metric tensor G(x)) trained against the
-{base_model} embedding space. Loaded by the ATLAS geometric-lens service
-to score code candidates without execution.
+Cost-field C(x), G(x) classifier, and their per-model calibration trained
+against the {base_model} embedding space. Loaded by the ATLAS geometric-lens
+service to score code candidates without execution.
 
 ## Files
 
@@ -1453,7 +1697,7 @@ to score code candidates without execution.
 ```bash
 # Drop these into your ATLAS checkout
 mkdir -p geometric-lens/geometric_lens/models/
-huggingface-cli download <this-repo> cost_field.pt \\
+huggingface-cli download <this-repo> \\
   --local-dir geometric-lens/geometric_lens/models/
 
 # Verify ATLAS picks them up
@@ -1529,6 +1773,7 @@ Model(
     name="{model_name}",
     # ... existing tier / model_file / model_size_gb / download_url ...
     lens_status="supported",
+    lens_calibrated=True,
     lens_artifact_dir=None,  # uses ATLAS_LENS_MODELS dir; per-model layout TBD by PC-058 follow-on
     lens_artifact_files={(artifact_files or ["cost_field.pt"])!r},
     license="{license_id}",
@@ -1580,7 +1825,23 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
                     f"{RESET if color else ''}")
         return 1
 
-    files_to_upload = ["cost_field.pt"]
+    missing = _missing_runtime_artifacts(artifact_dir)
+    if missing:
+        _safe_print(f"  {RED if color else ''}Lens artifact is incomplete or "
+                    f"uncalibrated; missing {', '.join(missing)}. Run "
+                    f"`atlas lens build` before publishing."
+                    f"{RESET if color else ''}")
+        return 1
+    invalid = _invalid_runtime_artifacts(artifact_dir, model_label)
+    if invalid:
+        _safe_print(f"  {RED if color else ''}Lens calibration is invalid: "
+                    f"{'; '.join(invalid)}. Run `atlas lens build` before "
+                    f"publishing.{RESET if color else ''}")
+        return 1
+
+    files_to_upload = ["cost_field.pt", "model_identity.json"]
+    norm_path = os.path.join(artifact_dir, "cx_normalization.json")
+    files_to_upload.append("cx_normalization.json")
     # Pickle-free twin: include only when at least as fresh as the .pt —
     # an older safetensors is a previous model's weights.
     st_path = os.path.join(artifact_dir, "cost_field.safetensors")
@@ -1746,9 +2007,16 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
     entry = _render_registry_entry(model_label, model_file or model_label,
                                    size_gb, entry_tier, dim, hf_repo,
                                    license_id, files_to_upload)
+    def _edit_registry(content: str) -> Optional[str]:
+        updated = _registry_set_lens(content, model_label, hf_repo,
+                                     files_to_upload)
+        if updated is not None:
+            return updated
+        return _registry_insert_entry(content, model_label, entry)
+
     pr_url = open_registry_pr_via_api(
         model_label, title, pr_body,
-        lambda content: _registry_insert_entry(content, model_label, entry),
+        _edit_registry,
         color)
     if pr_url:
         _safe_print(f"  {GREEN if color else ''}PR opened: "

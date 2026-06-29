@@ -8,7 +8,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-V3.1.0-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"/>
-  <img src="https://img.shields.io/badge/model-Qwen3.5--9B-green" alt="Model"/>
+  <img src="https://img.shields.io/badge/model-agnostic-green" alt="Model-agnostic"/>
 </p>
 
 <h1 align="center">A.T.L.A.S.</h1>
@@ -59,7 +59,7 @@ ATLAS は、自分の GPU 上で動くコーディングアシスタントです
    - [Derivation Chains](../../reports/V3_ABLATION_STUDY.md#derivation-chains-0-rescues) - 難問向けのマルチステップ推論
 
 4. **[Geometric Lens](../../ARCHITECTURE.md#5-geometric-lens)** - モデル自身の埋め込み上で動くエネルギーベースのスコアリング。外部オラクル不要。(「[Geometric Lens とは?](../../ARCHITECTURE.md#why-geometric-lens)」)
-   - [C(x) Cost Field](../../ARCHITECTURE.md#scoring-models) - 候補の品質をスコア化する 4096→512→128→1 の MLP
+   - [C(x) Cost Field](../../ARCHITECTURE.md#scoring-models) - 候補の品質をスコア化する hidden-dim→512→128→1 の MLP
    - [G(x) Quality Prediction](../../ARCHITECTURE.md#scoring-models) - 選択に用いる XGBoost アンサンブル
    - [RAG / PageIndex V2](../../ARCHITECTURE.md#rag--pageindex-v2) - AST 対応のコード検索とプロジェクトインデキシング
    - [Confidence Router](../../ARCHITECTURE.md#confidence-router--pattern-cache) - Thompson Sampling で必要な候補に計算を寄せる

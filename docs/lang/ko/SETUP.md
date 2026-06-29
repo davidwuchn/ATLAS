@@ -1,6 +1,6 @@
 > **[English](../../SETUP.md)** | **[简体中文](../zh-CN/SETUP.md)** | **[日本語](../ja/SETUP.md)** | **한국어**
 
-> ℹ️ **요약 번역본입니다.** Aider는 2026-05-02에 제거되었습니다. 현재 채팅 UI는 `atlas tui` (Bubbletea 기반) 입니다. 이 번역은 핵심 부분만 다루며, ASA 스티어링 벡터, `atlas init` 마법사, Plan Mode 등 새 기능의 전체 설명은 영어 원본 ([SETUP.md](../../SETUP.md))을 참조하십시오.
+> ℹ️ **요약 번역본입니다.** ATLAS에는 고정 기본 모델이 없습니다. `atlas init`으로 레지스트리 모델을 선택하거나 호환 GGUF를 지정하십시오. 최신 모델 독립적 설정은 영어 원본 ([SETUP.md](../../SETUP.md))을 참조하십시오.
 
 
 # ATLAS 설정 가이드
@@ -17,7 +17,7 @@
 | **NVIDIA 드라이버** | 전용 드라이버 설치 필요 (`nvidia-smi`에서 GPU가 표시되어야 합니다) |
 | **Python 3.9+** | pip 포함 |
 | **wget** | 모델 가중치 다운로드용 |
-| **모델 가중치** | HuggingFace의 Qwen3.5-9B-Q6_K.gguf (~7GB) |
+| **모델 가중치** | `atlas init`에서 선택한 레지스트리 모델 또는 호환 GGUF |
 
 ### GPU 확인
 

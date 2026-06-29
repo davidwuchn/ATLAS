@@ -99,7 +99,7 @@ ATLAS_LENS_URL=http://localhost:8099 \
 ATLAS_SANDBOX_URL=http://localhost:30820 \
 ATLAS_V3_URL=http://localhost:8070 \
 ATLAS_AGENT_LOOP=1 \
-ATLAS_MODEL_NAME=Qwen3.5-9B-Q6_K \
+ATLAS_MODEL_NAME=local-model \
 ATLAS_WORKSPACE_DIR=$(pwd)/.. \
 go run .
 ```

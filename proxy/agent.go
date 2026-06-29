@@ -46,8 +46,8 @@ import (
 // positives with this rationale.
 // ------------------------------------------------------------------------
 
-// stripThinkTags removes <think>...</think> blocks (Qwen3.5 reasoning
-// markers) from a response string. Used as a defensive cleanup when
+// stripThinkTags removes common <think>...</think> reasoning markers from a
+// response string. Used as a defensive cleanup when
 // reasoning_content gets surfaced as content fallback — the raw
 // reasoning text sometimes still has the tags wrapping it.
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
@@ -157,7 +157,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				body += formatGraphNeighborhood(idx.Graph)
 				if body != "" {
 					// Role MUST be "user" with a "[system note]:" prefix —
-					// Qwen3.5's Jinja template enforces "System message
+					// Some Jinja chat templates enforce "System message
 					// must be at the beginning" and 500s on any system
 					// role appended mid-conversation. Same convention
 					// the lens-intervention path uses (commit b79b31d).
@@ -196,7 +196,9 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 		eraseLlamaSlot(ctx)
 	}
 
-	// Get the constrained output schema
+	// Get the constrained output schema. The legacy string parameter is
+	// retained for call-site compatibility; token-level restrictions are
+	// assembled by buildStepRequest for each turn.
 	schemaJSON := buildToolCallSchemaJSON()
 
 	consecutiveReads := 0  // Track consecutive read-only calls
@@ -829,16 +831,18 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 						"gx_score_mean":       score.Aggregate.GxScoreMean,
 						"latency_ms":          score.LatencyMS,
 					})
-					if msg, intervene := agentLensRegression(ctx.LensScoreHistory, score.lowThreshold(), score.severeThreshold()); intervene {
-						log.Printf("[agent] lens regression at turn %d on %s — queuing corrective for next turn", turn, parsed.Name)
-						ctx.Stream("agent_lens_intervention", map[string]interface{}{
-							"turn":   turn,
-							"tool":   parsed.Name,
-							"reason": msg,
-						})
-						pendingLensCorrective = msg
-						// Reset history so we don't re-fire on the same crash.
-						ctx.LensScoreHistory = nil
+					if low, severe, calibrated := score.calibratedThresholds(); calibrated {
+						if msg, intervene := agentLensRegression(ctx.LensScoreHistory, low, severe); intervene {
+							log.Printf("[agent] lens regression at turn %d on %s — queuing corrective for next turn", turn, parsed.Name)
+							ctx.Stream("agent_lens_intervention", map[string]interface{}{
+								"turn":   turn,
+								"tool":   parsed.Name,
+								"reason": msg,
+							})
+							pendingLensCorrective = msg
+							// Reset history so we don't re-fire on the same crash.
+							ctx.LensScoreHistory = nil
+						}
 					}
 				}
 			}
@@ -1015,7 +1019,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 			// outline_file/find_file MUST be here too — otherwise an
 			// interleaved outline resets the counter and the model
 			// read→outline→read→outline forever without the breaker firing
-			// (observed live with Gemma). Every navigation-only tool counts.
+			// (observed live with a compact reasoning model). Every navigation-only tool counts.
 			isReadOnly := parsed.Name == "read_file" ||
 				parsed.Name == "outline_file" ||
 				parsed.Name == "list_directory" ||
@@ -1042,7 +1046,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 			// PC-207 agent-loop intervention: if the lens flagged a
 			// regression earlier in this iteration, append the corrective
 			// NOW so the next LLM call sees it after the tool result.
-			// Role MUST be "user" — Qwen3.5's Jinja template enforces
+			// Role MUST be "user" — some Jinja chat templates enforce
 			// "System message must be at the beginning" and rejects any
 			// system role appended mid-conversation, which previously
 			// crashed the next LLM call with a 500. The "[system note]:"
@@ -1118,7 +1122,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 			// PC-044: Trust V3-verified edits — strongly nudge toward done.
 			// When V3 ran the edit through its sandbox/probe pipeline and
 			// the result came back successful (V3Used && PhaseSolved
-			// non-empty), the edit is build-verified. The 9B model otherwise
+			// non-empty), the edit is build-verified. Compact models can otherwise
 			// keeps grinding: re-reads the file, edits unrelated functions,
 			// runs another V3 cycle (~110s each). Inject an explicit
 			// "you're done unless you have a specific reason" message.
@@ -1136,7 +1140,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 
 			// Exploration budget: after 4 consecutive read-only calls,
 			// inject nudge. After 5, skip reads.
-			// FUTURE (L6 reliability): The 9B model over-explores when adding
+			// FUTURE (L6 reliability): Compact models can over-explore when adding
 			// features to existing projects (~67% pass rate). Better prompting,
 			// larger model, or V3-guided exploration would improve this.
 			if consecutiveReads == 4 {
@@ -1178,7 +1182,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 // Returns the raw response text and token count.
 //
 // PC-043: When the model emits zero tokens (raw_len=0) — usually after a
-// tool result message under /nothink + json_object grammar — we retry
+// tool result message under a constrained JSON grammar — we retry
 // inline once with a bumped temperature and a transient "continue"
 // nudge appended to the messages. This avoids burning a full agent-loop
 // turn (~30s + tokens) on the parse-error retry path. The nudge is
@@ -1230,6 +1234,11 @@ func callLLMConstrained(ctx *AgentContext, schemaJSON string) (string, int, erro
 // and write_file from the tool-name production. See callLLMConstrained
 // docstring for the BiasBusters context.
 func buildStepRequest(ctx *AgentContext) ([]AgentMessage, string) {
+	// The /demo baseline keeps the ordinary file/tool harness so both panes
+	// produce comparable artifacts, but removes the explicit orchestration
+	// tool from the model's token-level vocabulary.
+	baselineExcluded := baselineToolExclusions(ctx)
+
 	// Plan-progress reminder. Always rendered when ctx.Plan exists;
 	// not persisted to ctx.Messages so it doesn't accumulate. Lands
 	// AT THE TAIL of the messages slice so the model sees it as the
@@ -1249,18 +1258,21 @@ func buildStepRequest(ctx *AgentContext) ([]AgentMessage, string) {
 		}
 		messages = append(messages, AgentMessage{Role: "user", Content: tbNote})
 		log.Printf("[agent] traceback step-restriction: banning run tools, forcing an edit")
-		return messages, buildGBNFGrammarForTools(tbExcluded)
+		return messages, buildGBNFGrammarForTools(mergeToolExclusions(baselineExcluded, tbExcluded))
 	}
 
 	excluded, ext := stepExclusions(ctx)
 	if len(excluded) == 0 {
-		if planReminder == "" {
+		if planReminder == "" && len(baselineExcluded) == 0 {
 			return ctx.Messages, ""
 		}
-		messages := append(append([]AgentMessage(nil), ctx.Messages...), AgentMessage{
-			Role:    "user",
-			Content: planReminder,
-		})
+		messages := append([]AgentMessage(nil), ctx.Messages...)
+		if planReminder != "" {
+			messages = append(messages, AgentMessage{Role: "user", Content: planReminder})
+		}
+		if len(baselineExcluded) > 0 {
+			return messages, buildGBNFGrammarForTools(baselineExcluded)
+		}
 		return messages, ""
 	}
 
@@ -1275,9 +1287,31 @@ func buildStepRequest(ctx *AgentContext) ([]AgentMessage, string) {
 	}
 	messages = append(messages, AgentMessage{Role: "user", Content: note})
 
-	grammar := buildGBNFGrammarForTools(excluded)
+	grammar := buildGBNFGrammarForTools(mergeToolExclusions(baselineExcluded, excluded))
 	log.Printf("[agent] step-restriction active: banning %v from tool-name enum (ext=%q) — BiasBusters #2/#3", excluded, ext)
 	return messages, grammar
+}
+
+func baselineToolExclusions(ctx *AgentContext) []string {
+	if ctx != nil && ctx.BypassV3 {
+		return []string{"plan_tasks"}
+	}
+	return nil
+}
+
+func mergeToolExclusions(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	var merged []string
+	for _, group := range groups {
+		for _, name := range group {
+			if _, exists := seen[name]; exists {
+				continue
+			}
+			seen[name] = struct{}{}
+			merged = append(merged, name)
+		}
+	}
+	return merged
 }
 
 // stepExclusions inspects the tail of ctx.Messages and returns the list
@@ -1562,14 +1596,14 @@ func callLLMOnce(ctx *AgentContext, messages []AgentMessage, temperature float64
 // toWireMessages converts the agent's internal messages to the role/content
 // pairs sent on /v1/chat/completions.
 //
-// Tool results are rendered as a USER turn. Gemma's chat template has no `tool`
-// role and silently DROPS role:"tool" messages — the model never sees the
+// Tool results are rendered as a USER turn. Some chat templates have no `tool`
+// role and silently drop role:"tool" messages — the model never sees the
 // result (verified: the prompt carries only the user/assistant turns and the
 // model reasons "the tool output is not visible"), so it re-issues the same
 // tool call forever until the repetition breaker fires. This was the real
 // cause behind every "it can't see what it's reading / it just loops" report.
 // Every chat template handles the user role, so converting here is
-// model-agnostic (Qwen reads it the same way); the `[tool result]` marker
+// model-agnostic; the `[tool result]` marker
 // tells the model this is tool output, not a fresh user instruction.
 // ctx.Messages keeps the semantic "tool" role so trim-pinning and the
 // step/traceback exclusions that key off ToolName still work.
@@ -1608,7 +1642,7 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 		// Without include_usage, the final SSE chunk before [DONE] has no
 		// usage block, so we can't report total_tokens to the TUI.
 		"stream_options": map[string]bool{"include_usage": true},
-		// Qwen3.5's chat template defaults enable_thinking=true, but the
+		// Some reasoning-capable chat templates default to thinking, but the
 		// agent loop relies on grammar-constrained JSON output — thinking
 		// blocks would just bloat tokens and llama-server rejects the
 		// combination outright once a trailing assistant message looks
@@ -1693,7 +1727,7 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 	var (
 		contentBuf strings.Builder
 		// PC-?: capture reasoning_content separately so we can fall
-		// back to it when contentBuf is empty. Qwen3.5 occasionally
+		// back to it when contentBuf is empty. Some models occasionally
 		// engages thinking mode despite enable_thinking=false (most
 		// reproducibly on retries with bumped temperature) — when it
 		// does, ALL output streams into delta.reasoning_content. The
@@ -1761,7 +1795,7 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 		for _, c := range chunk.Choices {
 			if c.Delta.ReasoningContent != "" {
 				// First output of ANY kind means prompt eval is done — for
-				// reasoning models (Gemma streams its whole chain as
+				// reasoning models (some stream their whole chain as
 				// reasoning_content, often with no content tokens until the
 				// final JSON) the first delta is reasoning, not content.
 				// Stop the prompt-eval poller and fire llm_first_token here
@@ -1804,7 +1838,7 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 			ctx.Stream("llm_token", map[string]interface{}{
 				"text": c.Delta.Content,
 			})
-			// Content-loop cut. Gemma sometimes states the right answer then
+			// Content-loop cut. Some models state the right answer then
 			// spirals on self-doubt in the CONTENT stream ("...the first line
 			// is X. Wait, I can't see the output. I'll just say X. Wait, I
 			// can't..." repeating) — the reasoning budget doesn't catch it
@@ -1852,8 +1886,8 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 		// No content deltas — check reasoning_content. Two distinct cases:
 		//
 		//   (a) Model dumped its actual response into the thinking
-		//       stream (Qwen3.5 hybrid reasoning firing despite the
-		//       /nothink directive). reasoning_content contains a JSON
+		//       stream despite template-level reasoning being disabled).
+		//       reasoning_content contains a JSON
 		//       tool_call; we recover it and parse normally.
 		//
 		//   (b) Model emitted ONLY thinking ("Now I need to read...")
@@ -1937,8 +1971,7 @@ func needsPermission(ctx *AgentContext, toolName string, args json.RawMessage) b
 func buildSystemPrompt(ctx *AgentContext) string {
 	var sb strings.Builder
 
-	// /nothink suppresses Qwen3.5's <think> mode — critical for JSON output
-	sb.WriteString("/nothink\nYou are ATLAS, a coding assistant that creates and modifies code by calling tools. ")
+	sb.WriteString("You are ATLAS, a coding assistant that creates and modifies code by calling tools. ")
 	sb.WriteString("You have access to the filesystem and can run commands to verify your work.\n")
 	sb.WriteString("You MUST respond with ONLY a single valid JSON object, no other text.\n\n")
 
@@ -1951,8 +1984,9 @@ func buildSystemPrompt(ctx *AgentContext) string {
 	sb.WriteString("- **Don't use `text` mid-task.** Roll narration into the done.summary at the end, or skip it entirely. Mid-task `text` ends the turn early.\n")
 	sb.WriteString("- **When unsure** whether the user wants chat or work: ask in a single `text` reply. Don't speculatively start tool-calling.\n\n")
 
-	// Tool descriptions
-	sb.WriteString(buildToolDescriptions())
+	// Tool descriptions. A demo baseline excludes orchestration-only tools
+	// from both this prompt and the per-turn grammar.
+	sb.WriteString(buildToolDescriptionsExcluding(baselineToolExclusions(ctx)))
 
 	// Rules
 	sb.WriteString("## Rules\n\n")
@@ -2267,7 +2301,7 @@ func handleAgent(w http.ResponseWriter, r *http.Request) {
 		SessionID  string       `json:"session_id"` // optional — required for /cancel
 		History    []historyMsg `json:"history,omitempty"`
 		// /demo split-pane flags — tags match tui/chat.go's agentRequest.
-		BypassV3         bool   `json:"bypass_v3,omitempty"`          // raw pane: short-circuit V3 calls
+		BypassV3         bool   `json:"bypass_v3,omitempty"`          // baseline pane: disable V3 orchestration
 		DisableFreshSlot bool   `json:"disable_fresh_slot,omitempty"` // keep the pre-warmed KV prefix
 		SandboxSubdir    string `json:"sandbox_subdir,omitempty"`     // confine writes to this workspace subdir
 	}
@@ -2527,7 +2561,7 @@ func classifyParseFailure(raw string) string {
 	if stripped == "" {
 		return "Your response was empty. Respond with ONLY a single JSON object — {\"type\":\"tool_call\",...} or {\"type\":\"text\",\"content\":\"...\"} or {\"type\":\"done\",\"summary\":\"...\"}."
 	}
-	// HTML-entity encoding detection — Qwen3.5 sometimes encodes <, >, &
+	// HTML-entity encoding detection — some models encode <, >, &
 	// inside tool-call string args (`&lt;!DOCTYPE...&gt;`) instead of
 	// emitting them literally. JSON parses fine if the whole envelope
 	// arrives, but those entities then appear verbatim in old_str and
@@ -3584,6 +3618,12 @@ func samplePlanContext(workingDir string, maxFiles, maxBytes int) map[string]str
 // Everything else gets a plan — we'd rather plan and have the model
 // ignore it than not plan and let the model thrash.
 func shouldGeneratePlan(ctx *AgentContext, message string) bool {
+	// A V3-bypassed demo request is the baseline side of the comparison.
+	// Running the V3 planner here made that pane visibly orchestrated even
+	// though its file writes bypassed V3 later in the turn.
+	if ctx != nil && ctx.BypassV3 {
+		return false
+	}
 	if ctx.Tier == Tier0Conversational {
 		return false
 	}

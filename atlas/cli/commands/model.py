@@ -11,7 +11,7 @@ Subcommands:
     atlas model remove     — delete a model file from ATLAS_MODELS_DIR
 
 The lens_status field is the central truth this command surfaces. A
-user installing Qwen3.5-14B-Q5_K_M on a large-tier box gets a working
+user installing a registry model on a compatible hardware tier gets a working
 llama.cpp model but no G(x) verification — half of what makes ATLAS
 *ATLAS*. Doctor warns at runtime; this command warns at install time.
 
@@ -209,6 +209,10 @@ def _emit_list(args: argparse.Namespace, color: bool) -> int:
         _safe_print(f"  {icon}  {name_col}")
         _safe_print(f"      tier: {m.tier:6s}  size: {m.model_size_gb:5.1f} GB  "
                     f"{_lens_label(m.lens_status)}  {DASH}  {inst_marker}")
+        if m.lens_status == "supported" and not m.lens_calibrated:
+            _safe_print(f"      {YELL if color else ''}Lens calibration: "
+                        f"legacy bundle; run `atlas lens build` before "
+                        f"production use{RESET if color else ''}")
         if installed:
             cur = model_registry.installed_size_gb(m, models_dir)
             if cur is not None and abs(cur - m.model_size_gb) > 0.5:
@@ -238,10 +242,11 @@ def _emit_recommend(args: argparse.Namespace, color: bool) -> int:
             "recommendation": (model_registry.as_dict(rec) if rec else None),
             "fallback": None,
         }
-        # If the tier-recommended model isn't `supported`, surface 9B as
-        # the fallback that actually works end-to-end.
+        # If the tier recommendation has no published weights, surface the
+        # best available Lens bundle as a fallback.
         if rec is None or rec.lens_status != "supported":
-            supported = model_registry.supported_models()
+            supported = sorted(model_registry.supported_models(),
+                               key=lambda item: not item.lens_calibrated)
             if supported:
                 out["fallback"] = model_registry.as_dict(supported[0])
         print(json.dumps(out, indent=2, ensure_ascii=not UNICODE_OK))
@@ -262,6 +267,11 @@ def _emit_recommend(args: argparse.Namespace, color: bool) -> int:
                 f"({rec.model_display}, {rec.model_size_gb:.1f} GB)")
     _safe_print(f"      Lens status: {_lens_label(rec.lens_status)}")
     if rec.lens_status == "supported":
+        if not rec.lens_calibrated:
+            _safe_print(f"      {YELL if color else ''}Calibration required: "
+                        f"published weights predate per-model C(x)/G(x) "
+                        f"calibration. Run `atlas lens build` before "
+                        f"production use.{RESET if color else ''}")
         if rec.can_install:
             _safe_print(f"      {GREEN if color else ''}Ready to install:"
                         f"{RESET if color else ''} "
@@ -271,17 +281,20 @@ def _emit_recommend(args: argparse.Namespace, color: bool) -> int:
                         f"see SETUP.md for manual download.{RESET if color else ''}")
         return 0
 
-    # Tier-default has no Lens artifacts. Surface 9B as the fallback.
+    # Tier-default has no Lens artifacts. Surface a published bundle.
     _safe_print()
     _safe_print(f"  {YELL if color else ''}This tier's recommended model has "
                 f"no Lens artifacts.{RESET if color else ''} G(x) verification "
                 f"will silently no-op if you install it.")
-    supported = model_registry.supported_models()
+    supported = sorted(model_registry.supported_models(),
+                       key=lambda item: not item.lens_calibrated)
     if supported:
         f = supported[0]
         _safe_print()
+        fallback_label = ("calibrated end-to-end" if f.lens_calibrated
+                          else "published Lens weights; calibration required")
         _safe_print(f"  {GREEN if color else ''}Recommended fallback "
-                    f"(end-to-end supported):{RESET if color else ''} "
+                    f"({fallback_label}):{RESET if color else ''} "
                     f"{BOLD if color else ''}{f.name}{RESET if color else ''}")
         _safe_print(f"      tier: {f.tier} (your hardware: {t.tier} {DASH} "
                     f"{'over-provisioned, fine' if t.tier in ('large','xlarge') else 'under-provisioned, may run slow'})")
@@ -375,6 +388,13 @@ def _emit_install(args: argparse.Namespace, color: bool) -> int:
             _safe_print("  See PC-058 roadmap for the Lens training pipeline "
                         "that will fix this.")
             return 1
+        if m.lens_status == "supported" and not m.lens_calibrated:
+            _safe_print(f"  {YELL if color else ''}Note: `{m.name}` has a "
+                        f"legacy Lens weight bundle without current per-model "
+                        f"C(x)/G(x) calibration. Installation may continue, "
+                        f"but Lens interventions remain disabled until you run "
+                        f"`atlas lens build`.{RESET if color else ''}")
+            _safe_print()
 
     if not m.can_install:
         _safe_print(f"  {RED if color else ''}Cannot install `{m.name}`: "
@@ -564,13 +584,31 @@ def _install_artifacts(m: model_registry.Model, models_dir: str,
                     f"→ {models_dir}")
         for fname in m.asa_artifact_files:
             target_path = os.path.join(models_dir, fname)
-            if os.path.isfile(target_path) and not args.force_artifacts:
+            marker_path = target_path + ".model"
+            marker = ""
+            try:
+                with open(marker_path) as marker_file:
+                    marker = marker_file.read().strip()
+            except OSError:
+                pass
+            if (os.path.isfile(target_path) and not args.force_artifacts
+                    and marker in (m.name, m.model_file)):
                 _safe_print(f"    [skip] {fname} already present")
                 continue
+            if os.path.isfile(target_path) and not args.force_artifacts:
+                _safe_print(f"    [replace] {fname} is unmarked or belongs "
+                            f"to {marker or 'another model'}")
             attempted += 1
             url = m.asa_artifact_url_base + fname
             if _download_artifact(url, target_path, color) != 0:
                 failures += 1
+            else:
+                try:
+                    with open(marker_path, "w") as marker_file:
+                        marker_file.write(m.name + "\n")
+                except OSError as e:
+                    _safe_print(f"    could not write ASA model marker: {e}")
+                    failures += 1
 
     if attempted == 0:
         return 0  # nothing to do or everything already present

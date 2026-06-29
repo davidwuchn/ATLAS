@@ -124,7 +124,7 @@ This reads `.env` and starts `llama-server-metal` with the same flags as the Doc
 
 ```
 ATLAS llama-server (native macOS Metal) — #32 hybrid path
-  Model:                /Users/you/ATLAS/models/Qwen3.5-9B-Q6_K.gguf
+  Model:                /Users/you/ATLAS/models/<selected-model>.gguf
   Context length:       32768
   Parallel slots:       1
   KV cache K / V:       q8_0 / q4_0

@@ -70,6 +70,35 @@ func TestBuildResponseFormat_UnknownModeDefaultsToStrict(t *testing.T) {
 	}
 }
 
+func TestDemoBaselineExcludesOrchestrationTool(t *testing.T) {
+	ctx := &AgentContext{
+		BypassV3: true,
+		Messages: []AgentMessage{{Role: "user", Content: "build the project"}},
+	}
+	prompt := buildSystemPrompt(ctx)
+	if strings.Contains(prompt, "### plan_tasks") {
+		t.Fatal("baseline prompt advertises plan_tasks orchestration tool")
+	}
+	_, grammar := buildStepRequest(ctx)
+	if grammar == "" {
+		t.Fatal("baseline must use a token-level grammar that excludes orchestration tools")
+	}
+	if strings.Contains(grammar, `\"plan_tasks\"`) {
+		t.Fatal("baseline grammar still permits plan_tasks")
+	}
+}
+
+func TestNormalAgentKeepsOrchestrationTool(t *testing.T) {
+	ctx := &AgentContext{Messages: []AgentMessage{{Role: "user", Content: "build the project"}}}
+	if prompt := buildSystemPrompt(ctx); !strings.Contains(prompt, "### plan_tasks") {
+		t.Fatal("normal agent prompt lost plan_tasks")
+	}
+	_, grammar := buildStepRequest(ctx)
+	if grammar != "" {
+		t.Fatalf("normal agent unexpectedly received override grammar: %q", grammar)
+	}
+}
+
 // TestSchemaConstrained_ReachesLlamaServerOverTheWire is the
 // integration-shaped end of #33: it spins up a fake llama-server with
 // httptest, captures the actual JSON the proxy POSTs, and verifies the
@@ -156,8 +185,8 @@ func TestSchemaConstrained_ReachesLlamaServerOverTheWire(t *testing.T) {
 		t.Errorf("response_format.type = %v, want json_object", rf["type"])
 	}
 	if _, hasSchema := rf["schema"]; !hasSchema {
-		t.Errorf("response_format on the wire MISSING schema field — " +
-			"the #33 optimization regressed to loose JSON. " +
+		t.Errorf("response_format on the wire MISSING schema field — "+
+			"the #33 optimization regressed to loose JSON. "+
 			"request body: %v", got)
 	}
 

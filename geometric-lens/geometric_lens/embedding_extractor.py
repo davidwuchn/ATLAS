@@ -90,9 +90,9 @@ def extract_per_token(text: str) -> Tuple[List[List[float]], int]:
 
     Used by PC-207 lens-as-PRM to score each generation step instead of only
     pooled completed text. Works against vanilla llama-server (no PC-202 patch
-    required) because Qwen3.5 returns per-token by default; if the server is
-    configured with pooling != none we still detect the pooled-flat shape and
-    raise rather than silently degrade.
+    required) when the server uses `--pooling none`; if it is configured with
+    another pooling mode we detect the pooled-flat shape and raise rather than
+    silently degrade.
 
     Returns:
         (per_token_vectors, hidden_dim) — outer list is one entry per input
@@ -103,8 +103,7 @@ def extract_per_token(text: str) -> Tuple[List[List[float]], int]:
     if not isinstance(raw[0], list):
         raise ValueError(
             "extract_per_token needs per-token embeddings; "
-            "llama-server appears to be pooling. Start it with --pooling none "
-            "(Qwen3.5 default) or use a model whose default pooling is none."
+            "llama-server appears to be pooling. Start it with --pooling none."
         )
     return raw, len(raw[0])
 

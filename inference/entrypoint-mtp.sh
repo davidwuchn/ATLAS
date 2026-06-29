@@ -15,7 +15,7 @@ PARALLEL="${PARALLEL_SLOTS:-4}"
 MODEL_FILE="${MODEL_PATH:-/models/Qwen3.5-9B-MTP-Q4_K_M-F16mtp.gguf}"
 
 # Backend-specific runtime tuning (V3.1.1 multi-backend). Mirrors the
-# block in entrypoint-v3.1-9b.sh; kept inline rather than sourced so this
+# block in entrypoint-v3.1.sh; kept inline rather than sourced so this
 # experimental MTP path stays self-contained. Refactor candidate for
 # V3.1.2 once we add a fourth backend (Metal).
 ATLAS_BACKEND="${ATLAS_BACKEND:-cuda}"

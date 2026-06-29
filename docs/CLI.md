@@ -373,7 +373,7 @@ for the full picture; the short version:
 
 | Service | Port | Role |
 |---|---|---|
-| llama-server | 8080 | Local LLM inference (llama.cpp / Qwen3.5-9B-Q6_K) |
+| llama-server | 8080 | Local GGUF inference through llama.cpp |
 | atlas-proxy | 8090 | Agent loop, tool execution, V3 routing, SSE event broker |
 | v3-service | 8070 | V3 pipeline (PlanSearch, DivSampling, build verification, repair) |
 | geometric-lens | 8099 | C(x)/G(x) energy scoring |
@@ -402,8 +402,8 @@ atlas tier fit --json                   # machine-readable (meta + budget + env)
 Example:
 
 ```
-atlas tier fit — gemma-4-12b-it-Q4_K_M.gguf
-  arch gemma4 | 48 layers | 3840-dim | head_dim 512 | window 1024, per-layer mask (40/48 sliding)
+atlas tier fit — selected-model-Q4_K_M.gguf
+  arch modelarch | 48 layers | 3840-dim | head_dim 512 | window 1024, per-layer mask (40/48 sliding)
   GPU: NVIDIA GeForce RTX 5060 Ti (15.9 GiB)
   budget: weights 6.77 + KV 3.88 + compute 2.05 + reserve 1.9 GiB of 15.93 GiB
   fit: ctx 131072 (32768/slot × 4), KV f16, ubatch 2048
@@ -497,7 +497,7 @@ K3s); explicit `LLAMA_URL`/`RAG_API_URL` env vars override.
 ```bash
 atlas bench --tasks 15                       # quick sanity subset
 atlas bench --run-id mymodel_lens --tasks 200   # named run for the lens retrain
-atlas bench                                  # full dataset (hours on a 12B)
+atlas bench                                  # full dataset (hours on a local model)
 ```
 
 | Flag | Default | Meaning |
@@ -528,7 +528,7 @@ Cheap pre-flight against the running llama-server. No training, no model downloa
 
 ```bash
 atlas lens check                       # probe whatever llama-server has loaded
-atlas lens check Qwen3.5-9B-Q6_K       # probe a registry entry by name
+atlas lens check <registry-name>        # probe a registry entry by name
 atlas lens check /path/to/model.gguf   # probe an arbitrary file
 atlas lens check --json                # machine-readable for scripts / CI
 ```
@@ -591,7 +591,7 @@ a missing dependency — only embeds the new samples. For `--from-results
 invalidates the cache automatically.
 
 After a successful build:
-1. `cost_field.pt` + `gx_xgboost.json` + `gx_weights.json` land in the artifact dir (default `geometric-lens/geometric_lens/models/`, override with `--artifact-dir`).
+1. `cost_field.pt`, `gx_xgboost.json`, `gx_weights.json`, both calibration files, and `model_identity.json` land in the artifact dir (default `geometric-lens/geometric_lens/models/`, override with `--artifact-dir`). The identity file prevents a same-width artifact from being reused with a different model.
 2. Restart the lens service so it loads them: `docker compose restart geometric-lens`.
 3. Re-run `atlas lens check` — should now report `compat`.
 4. Run `atlas lens publish` (PC-059, below) to upload to HuggingFace + open a registry PR. Or, for private/manual flows, hand-edit `atlas/cli/commands/model_registry.py` to set `lens_status="supported"`.
@@ -603,7 +603,7 @@ Uploads trained artifacts to a HuggingFace repo and generates a maintainer-revie
 > **New to publishing?** See [docs/PUBLISHING.md](PUBLISHING.md) for the end-to-end walkthrough — HF account setup, token generation, what happens after submission, and troubleshooting. The reference below assumes you've already got `HF_TOKEN` set.
 
 ```bash
-atlas lens publish Qwen3.5-9B-Q6_K --repo alice/atlas-lens-qwen35-9b
+atlas lens publish <registry-name> --repo alice/atlas-lens-my-model
 atlas lens publish <model> --repo <user>/<repo> --license mit
 atlas lens publish <model> --dry-run            # hash + render PR body, don't upload
 atlas lens publish <model> --skip-pr            # upload to HF, print PR body for manual paste
@@ -656,7 +656,8 @@ Trains a fresh ASA vector by running `build_steering_vector.py` inside the lens 
 ```bash
 atlas asa build                                  # train w/ bundled contrast_pairs.jsonl
 atlas asa build --pairs custom.jsonl             # custom pairs (same {prompt, label} schema)
-atlas asa build --layer 27                       # extraction layer (default 27 = ~75% of Qwen3.5-9B's 36)
+atlas asa build                                  # layer defaults to 75% of loaded model depth
+atlas asa build --layer <index>                  # explicit extraction-layer override
 atlas asa build --limit 50                       # smoke test (50 pairs, ~1 min)
 atlas asa build --container atlas-geometric-lens-1   # override container name
 atlas asa build --dry-run                        # stage but don't run
@@ -674,7 +675,7 @@ After build:
 Same shape as `atlas lens publish` — uploads the trained `.gguf` to a HuggingFace repo and generates a maintainer-reviewable registry PR. Full contributor walkthrough lives in [docs/PUBLISHING.md](PUBLISHING.md).
 
 ```bash
-atlas asa publish Qwen3.5-9B-Q6_K --repo alice/atlas-asa-qwen35-9b
+atlas asa publish <registry-name> --repo alice/atlas-asa-my-model
 atlas asa publish --dry-run                      # render PR body, no upload
 atlas asa publish --vector path/to/v.gguf        # custom vector path
 ```

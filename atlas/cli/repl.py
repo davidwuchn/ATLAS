@@ -25,7 +25,7 @@ INFERENCE_URL = os.environ.get("ATLAS_INFERENCE_URL", "http://localhost:8080")
 LENS_URL = os.environ.get("ATLAS_LENS_URL", "http://localhost:8099")
 SANDBOX_URL = os.environ.get("ATLAS_SANDBOX_URL", "http://localhost:30820")
 V3_URL = os.environ.get("ATLAS_V3_URL", "http://localhost:8070")
-MODEL_NAME = os.environ.get("ATLAS_MODEL_NAME", "Qwen3.5-9B-Q6_K")
+MODEL_NAME = os.environ.get("ATLAS_MODEL_NAME", "local-model")
 
 _proxy_process = None
 

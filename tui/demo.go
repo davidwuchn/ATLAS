@@ -1,14 +1,14 @@
 // Demo mode — split-pane recording subprogram. Two concurrent
-// /v1/agent sessions against the same atlas-proxy: left pane runs with
-// bypass_v3=true (raw 9B, no orchestration), right pane runs V3
-// normally. Same model, two llama-server slots, side-by-side.
+// /v1/agent sessions against the same atlas-proxy: the left pane is the
+// base file/tool agent with V3 disabled, while the right pane adds V3.
+// Same configured model, two llama-server slots, side-by-side.
 //
 // Implementation note: each pane uses a real `tuiModel` as its chat
 // state holder. We forward every chatEvent into that model's
 // appendChatEvent, then call renderChatPane to draw. That way the
 // V3 pane formats EXACTLY like a normal atlas-tui session — every
 // tool call, V3 stage, token stream, lens score row — with no
-// reimplementation. The raw pane gets the same machinery so its
+// reimplementation. The baseline pane gets the same machinery so its
 // tool-call and reasoning-token rendering look polished too.
 //
 // Reliability without scripting: prompt comes from a curated bank in
@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -38,19 +39,19 @@ import (
 var demoPromptsFallback embed.FS
 
 // demoPrompt is one entry from the curated bank. The expected_* fields
-// document what the raw side is supposed to trip on and what V3 is
-// supposed to repair — they're not enforced at runtime, but they let
+// document what the baseline may miss and what V3 is expected to repair —
+// they're not enforced at runtime, but they let
 // future contributors know what each prompt is *for*. Difficulty is the
 // recording-budget bucket: "short" = single-file, fast (good for the
 // 30-60s cut); "medium" = 2 files, ~3-5 min; "long" = multi-file
 // Flask/FastAPI, can take 30+ min. /demo <length> filters the bank
 // before random pick so the cut doesn't blow its budget.
 type demoPrompt struct {
-	Prompt             string `json:"prompt"`
-	Difficulty         string `json:"difficulty,omitempty"` // "short" | "medium" | "long"
-	ExpectedRawFailure string `json:"expected_raw_failure"`
-	ExpectedV3Repair   string `json:"expected_v3_repair"`
-	Notes              string `json:"notes,omitempty"`
+	Prompt                  string `json:"prompt"`
+	Difficulty              string `json:"difficulty,omitempty"` // "short" | "medium" | "long"
+	ExpectedBaselineFailure string `json:"expected_baseline_failure"`
+	ExpectedV3Repair        string `json:"expected_v3_repair"`
+	Notes                   string `json:"notes,omitempty"`
 }
 
 // demoStreamMsg delivers a chatEvent from one of the two streaming
@@ -85,6 +86,7 @@ type demoModel struct {
 	workingDir string
 	length     string // "short" (30s) | "medium" (60s) | "long" (3-5m)
 	prompt     demoPrompt
+	modelLabel string // resolved from the proxy's OpenAI-compatible model list
 
 	// Per-side sandbox subdirectories under workingDir, created at
 	// startup and passed to the proxy as `sandbox_subdir`. Each side
@@ -121,8 +123,8 @@ type demoModel struct {
 	// top of the screen. While typing, streams haven't fired yet — the
 	// real /v1/agent requests go out the moment typing completes, not
 	// on Init, so the viewer sees prompt → reaction in the right order.
-	promptShown   int
-	streamsFired  bool
+	promptShown  int
+	streamsFired bool
 
 	// Spinner frame index. Ticks on demoTickMsg; consumed in
 	// streamStatus so each pane shows a moving glyph while in flight.
@@ -254,6 +256,7 @@ func newDemoModel(proxyURL, workingDir, length string) (*demoModel, error) {
 		workingDir: workingDir,
 		length:     length,
 		prompt:     p,
+		modelLabel: fetchDemoModelLabel(proxyURL),
 		events:     make(chan demoEvent, 1024),
 		ctx:        ctx,
 		cancel:     cancel,
@@ -263,6 +266,99 @@ func newDemoModel(proxyURL, workingDir, length string) (*demoModel, error) {
 		v3Sandbox:  v3Sandbox,
 		activePane: "v3",
 	}, nil
+}
+
+const demoModelFallback = "MODEL"
+
+// fetchDemoModelLabel resolves the model actually configured in the proxy.
+// Metadata is presentation-only: if the endpoint is unavailable or malformed,
+// the demo still launches with a neutral label instead of guessing a family or
+// parameter count.
+func fetchDemoModelLabel(proxyURL string) string {
+	req, err := http.NewRequest(http.MethodGet,
+		strings.TrimRight(proxyURL, "/")+"/v1/models", nil)
+	if err != nil {
+		return demoModelFallback
+	}
+	if tok := loadBearerToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return demoModelFallback
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return demoModelFallback
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || len(payload.Data) == 0 {
+		return demoModelFallback
+	}
+	return formatDemoModelLabel(payload.Data[0].ID)
+}
+
+// formatDemoModelLabel turns a registry identifier such as
+// orion-code-10b-it-Q4_K_M into a compact title (Orion code 10B). The exact ID
+// remains available from /v1/models; the demo title favors readability.
+func formatDemoModelLabel(id string) string {
+	id = strings.TrimSpace(filepath.Base(id))
+	if strings.HasSuffix(strings.ToLower(id), ".gguf") {
+		id = id[:len(id)-len(".gguf")]
+	}
+	if id == "" || id == "." {
+		return demoModelFallback
+	}
+	parts := strings.FieldsFunc(id, func(r rune) bool { return r == '-' || r == '_' })
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		lower := strings.ToLower(part)
+		if len(lower) > 1 && lower[0] == 'q' && lower[1] >= '0' && lower[1] <= '9' {
+			break // quantization suffix (Q4_K_M, Q6_K, ...)
+		}
+		if lower == "it" || lower == "instruct" || lower == "chat" {
+			continue
+		}
+		if len(lower) > 1 && lower[len(lower)-1] == 'b' {
+			allDigits := true
+			for _, r := range lower[:len(lower)-1] {
+				if r < '0' || r > '9' {
+					allDigits = false
+					break
+				}
+			}
+			if allDigits {
+				part = strings.ToUpper(part)
+			}
+		}
+		kept = append(kept, part)
+	}
+	if len(kept) == 0 {
+		return demoModelFallback
+	}
+	if first := kept[0]; first != "" {
+		kept[0] = strings.ToUpper(first[:1]) + first[1:]
+	}
+	return strings.Join(kept, " ")
+}
+
+func (m *demoModel) displayModelLabel() string {
+	if strings.TrimSpace(m.modelLabel) == "" {
+		return demoModelFallback
+	}
+	return m.modelLabel
+}
+
+func (m *demoModel) baselineTitle() string {
+	return m.displayModelLabel() + "  ·  BASE AGENT  ·  V3 OFF"
+}
+
+func (m *demoModel) atlasTitle() string {
+	return m.displayModelLabel() + "  ·  ATLAS V3"
 }
 
 func (m *demoModel) Init() tea.Cmd {
@@ -526,9 +622,9 @@ func (m *demoModel) View() string {
 		footer = demoStatusStyle.Render(
 			"output review  ·  tab: switch side  ·  n/p (or ←/→): cycle file  ·  1-9: jump  ·  q: quit  ·  active: " + m.activePane)
 	} else {
-		rawTitle := demoRawTitleStyle.Render("RAW 9B  ·  no V3 orchestration") + "  " +
+		rawTitle := demoRawTitleStyle.Render(m.baselineTitle()) + "  " +
 			demoStatusStyle.Render(streamStatus(m.rawChild, m.rawDone, m.rawEverStreamed, m.rawErr))
-		v3Title := demoV3TitleStyle.Render("ATLAS V3  ·  plan → sample → verify → repair") + "  " +
+		v3Title := demoV3TitleStyle.Render(m.atlasTitle()) + "  " +
 			demoStatusStyle.Render(streamStatus(m.v3Child, m.v3Done, m.v3EverStreamed, m.v3Err))
 
 		// Reserve one row at the bottom of each pane for the thinking
@@ -699,23 +795,23 @@ func (m *demoModel) setActiveIdx(i int) {
 // so the viewer knows which side keys apply to.
 func (m *demoModel) renderOutputPane(side string, w, h int) string {
 	var (
-		sandbox   string
-		files     []string
-		selected  int
-		title     string
+		sandbox    string
+		files      []string
+		selected   int
+		title      string
 		titleStyle lipgloss.Style
 	)
 	if side == "raw" {
 		sandbox = m.rawSandbox
 		files = m.rawFiles
 		selected = m.rawSelectedIdx
-		title = "RAW 9B  ·  " + sandbox
+		title = m.baselineTitle() + "  ·  " + sandbox
 		titleStyle = demoRawTitleStyle
 	} else {
 		sandbox = m.v3Sandbox
 		files = m.v3Files
 		selected = m.v3SelectedIdx
-		title = "ATLAS V3  ·  " + sandbox
+		title = m.atlasTitle() + "  ·  " + sandbox
 		titleStyle = demoV3TitleStyle
 	}
 

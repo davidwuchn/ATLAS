@@ -38,7 +38,7 @@ flowchart TD
 Defined in `v3-service/main.py`. The handler:
 
 1. Renders `PLAN_PROMPT_TEMPLATE` with the user message + working dir + truncated project files.
-2. Calls the LLM 3 times with seed offsets and temperatures `[0.3, 0.5, 0.7]`. `chat_template_kwargs: {enable_thinking: false}` — Qwen3.5 routes its `<think>` block into `delta.reasoning_content` when thinking is on, which the chat-completions consumer doesn't see, so we'd burn a 2048-token budget on reasoning and emit zero JSON. The flag disables thinking at the chat-template layer; the prompt's `/nothink` directive alone is unreliable.
+2. Calls the LLM 3 times with seed offsets and temperatures `[0.3, 0.5, 0.7]`. By default it sends the optional `chat_template_kwargs: {enable_thinking: false}` control and reserves 2,048 output tokens for plan JSON. Supporting templates disable their reasoning channel; other templates ignore the flag. `ATLAS_PLAN_THINKING=1` requests reasoning and raises the budget to 8,192. No model-family prompt directive is injected.
 3. Parses each raw response with a markdown-fence-tolerant + brace-depth-aware extractor (`_parse_plan_json`).
 4. Scores each parsed plan with `_score_plan`:
    - **+0.3** for having a `verify_step`

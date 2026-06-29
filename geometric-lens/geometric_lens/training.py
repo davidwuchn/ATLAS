@@ -20,6 +20,7 @@ import torch.optim as optim
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from geometric_lens.cost_field import CostField
+from geometric_lens.thresholds import derive_gx_thresholds as _derive_gx_thresholds
 
 
 def load_gate_data(path: str = None) -> dict:
@@ -230,7 +231,7 @@ def compute_energy_auc(model, embeddings, labels, device):
     return concordant / total if total > 0 else 0.5
 
 
-def save_cost_field(cost_field, save_dir=None):
+def save_cost_field(cost_field, save_dir=None, normalization=None):
     """Save trained C(x) model weights.
 
     Writes both cost_field.pt (what the service loads) and
@@ -253,6 +254,10 @@ def save_cost_field(cost_field, save_dir=None):
     except ImportError:
         print("safetensors not installed — skipping the pickle-free twin "
               "(pip install safetensors)")
+    if normalization is not None:
+        from geometric_lens.calibration import save_cx_normalization
+        norm_path = save_cx_normalization(save_dir, normalization)
+        print(f"C(x) normalization saved to {norm_path}")
     return cost_path
 
 
@@ -347,7 +352,7 @@ def train_gx(
     # Per-model operating thresholds, derived from THIS model's score scale so
     # the off-rails / regression interventions actually fire (a fixed 0.3/0.15
     # cutoff tuned for one model is silent on another whose grounded writes
-    # cluster higher — the Gemma case). gx_score = P(pass): good writes score
+    # cluster elsewhere). gx_score = P(pass): good writes score
     # high, bad writes low. We anchor on percentiles of the PASS distribution
     # so each cutoff has a controlled false-positive rate on good writes:
     #   severe (~5th pct)    — a good write almost never scores this low, so one
@@ -380,33 +385,6 @@ def train_gx(
     }
 
 
-def _derive_gx_thresholds(pass_scores) -> dict:
-    """Compute per-model {off_rails, low, severe} from the PASS-class score
-    distribution. Percentile-anchored so each cutoff has a controlled
-    false-positive rate on good writes; clamped to [0.02, 0.6] and ordered
-    severe <= off_rails <= low. Falls back to the historical defaults when
-    there aren't enough PASS samples to estimate percentiles reliably."""
-    import numpy as np
-    default = {"off_rails": 0.3, "low": 0.15, "severe": 0.05}
-    if pass_scores is None or len(pass_scores) < 20:
-        return default
-
-    def clamp(v):
-        return float(min(0.6, max(0.02, v)))
-
-    severe = clamp(float(np.percentile(pass_scores, 5)))
-    off_rails = clamp(float(np.percentile(pass_scores, 10)))
-    low = clamp(float(np.percentile(pass_scores, 20)))
-    # Enforce ordering after clamping (a bound can collapse the spread).
-    off_rails = max(off_rails, severe)
-    low = max(low, off_rails)
-    return {
-        "off_rails": round(off_rails, 3),
-        "low": round(low, 3),
-        "severe": round(severe, 3),
-    }
-
-
 def save_gx(gx_result: dict, save_dir=None):
     """Save trained G(x) artifacts in the layout service.py loads.
 
@@ -429,7 +407,7 @@ def save_gx(gx_result: dict, save_dir=None):
 
     # Per-model operating thresholds travel with the artifact (the lens service
     # loads this per-model; the proxy reads it back from each score response).
-    # Absent → service falls back to the historical fixed cutoffs.
+    # Absent → service keeps threshold interventions disabled.
     thresholds = gx_result.get("thresholds")
     if thresholds:
         thr_path = os.path.join(save_dir, "gx_thresholds.json")
@@ -448,9 +426,8 @@ def save_gx(gx_result: dict, save_dir=None):
 def load_cost_field(save_dir=None, dim=None):
     """Load trained C(x) model weights.
 
-    If dim is None, infers from saved weights. Falls back to EMBEDDING_DIM
-    env var (code default 768; the real dim is model-dependent —
-    e.g. 4096 for Qwen3.5-9B, 3840 for Gemma 4 12B).
+    If dim is None, infer it from saved weights. A missing checkpoint requires
+    an explicit dimension; fabricating one would silently select a model shape.
     """
     if save_dir is None:
         save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -461,7 +438,9 @@ def load_cost_field(save_dir=None, dim=None):
             sd = torch.load(cost_path, map_location="cpu", weights_only=True)
             dim = sd["net.0.weight"].shape[1]  # first Linear's input dim
         else:
-            dim = int(os.environ.get("EMBEDDING_DIM", "768"))
+            raise ValueError(
+                "cost_field.pt is missing and no input dimension was provided"
+            )
 
     cost_field = CostField(input_dim=dim)
 
@@ -511,7 +490,7 @@ def retrain_cost_field_bce(
 
     Args:
         embeddings: List of float lists, one per sample (the model's
-            hidden dim — e.g. 4096 for Qwen3.5-9B, 3840 for Gemma 4 12B).
+            hidden dimension reported by the selected model).
         labels: List of "PASS" or "FAIL" strings.
         epochs: Maximum training epochs.
         lr: Learning rate. If None, selected adaptively based on dataset size.
@@ -806,7 +785,10 @@ if __name__ == "__main__":
 
     # Save model
     print("\n--- Saving Model ---")
-    save_cost_field(cx_result["model"])
+    from geometric_lens.calibration import derive_cx_normalization
+    normalization = derive_cx_normalization(
+        cx_result["pass_energy_mean"], cx_result["fail_energy_mean"])
+    save_cost_field(cx_result["model"], normalization=normalization)
 
     # Summary
     print("\n" + "=" * 60)

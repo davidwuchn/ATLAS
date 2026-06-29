@@ -77,13 +77,18 @@ logger = logging.getLogger(__name__)
 
 # Boot-time self-test cache. Populated in lifespan(); read by /health and /ready.
 # Keys: lens_enabled, lens_cost_field_loaded, lens_cost_field_dim, lens_gx_loaded,
-#       lens_gx_type, embed_dim, self_test_pass, self_test_error.
+#       lens_gx_type, lens_cx_calibrated, lens_gx_calibrated, lens_artifact_model,
+#       embed_dim,
+#       self_test_pass, self_test_error.
 _BOOT_STATE: Dict[str, Any] = {
     "lens_enabled": False,
     "lens_cost_field_loaded": False,
     "lens_cost_field_dim": None,
     "lens_gx_loaded": False,
     "lens_gx_type": "none",
+    "lens_cx_calibrated": False,
+    "lens_gx_calibrated": False,
+    "lens_artifact_model": None,
     "embed_dim": None,
     "self_test_pass": False,
     "self_test_error": None,
@@ -112,9 +117,12 @@ def _run_lens_self_test() -> None:
         _BOOT_STATE["lens_cost_field_loaded"] = bool(info.get("loaded"))
         _BOOT_STATE["lens_gx_loaded"] = bool(info.get("gx_loaded"))
         _BOOT_STATE["lens_gx_type"] = info.get("gx_type", "none")
+        _BOOT_STATE["lens_cx_calibrated"] = bool(info.get("cx_calibrated"))
+        _BOOT_STATE["lens_gx_calibrated"] = bool(info.get("gx_calibrated"))
+        _BOOT_STATE["lens_artifact_model"] = info.get("artifact_model")
         if not loaded:
-            _BOOT_STATE["self_test_error"] = (
-                "lens model files missing — run scripts/download-models.sh --lens"
+            _BOOT_STATE["self_test_error"] = info.get("error") or (
+                "lens model files missing — run `atlas lens build`"
             )
             return
 
@@ -316,6 +324,9 @@ async def health():
                 "embed_dim": _BOOT_STATE["embed_dim"],
                 "gx_loaded": _BOOT_STATE["lens_gx_loaded"],
                 "gx_type": _BOOT_STATE["lens_gx_type"],
+                "cx_calibrated": _BOOT_STATE["lens_cx_calibrated"],
+                "gx_calibrated": _BOOT_STATE["lens_gx_calibrated"],
+                "artifact_model": _BOOT_STATE["lens_artifact_model"],
                 "self_test_pass": _BOOT_STATE["self_test_pass"],
                 "self_test_error": _BOOT_STATE["self_test_error"],
             },
@@ -1021,11 +1032,14 @@ async def lens_score_text(request: LensScoreTextRequest):
         with torch.no_grad():
             energy = lens_service._cost_field(x).item()
 
-        # Qwen3.5-9B C(x) retrained: PASS ~13.2, FAIL ~24.9, midpoint ~19.0
-        normalized = 1.0 / (1.0 + 2.718 ** (-(energy - 19.0) / 2.0))
-        normalized = min(1.0, max(0.0, normalized))
+        normalized = lens_service._normalize_cx_energy(energy)
 
-        return {"energy": energy, "normalized": normalized, "enabled": True}
+        return {
+            "energy": energy,
+            "normalized": normalized,
+            "calibrated": lens_service._cx_normalization is not None,
+            "enabled": True,
+        }
     except Exception as e:
         logger.error(f"Lens score-text failed: {e}")
         return {"energy": 0.0, "normalized": 0.5, "error": str(e)}
@@ -1083,6 +1097,14 @@ async def lens_retrain(request: LensRetrainRequest):
             domain=request.domain,
         )
 
+        if not metrics.get("skipped", False):
+            from geometric_lens.calibration import (
+                derive_cx_normalization, save_cx_normalization,
+            )
+            calibration = derive_cx_normalization(
+                metrics["pass_energy_mean"], metrics["fail_energy_mean"])
+            save_cx_normalization(models_dir, calibration)
+
         # Remove non-serializable 'model' key from metrics
         metrics.pop("model", None)
 
@@ -1133,6 +1155,7 @@ async def lens_gx_score(request: LensScoreTextRequest):
         if not is_enabled():
             return {
                 "cx_energy": 0.0, "cx_normalized": 0.5,
+                "cx_calibrated": False,
                 "gx_score": 0.5, "verdict": "unavailable",
                 "enabled": False, "gx_available": False,
             }
@@ -1142,6 +1165,7 @@ async def lens_gx_score(request: LensScoreTextRequest):
         logger.error(f"Lens gx-score failed: {e}")
         return {
             "cx_energy": 0.0, "cx_normalized": 0.5,
+            "cx_calibrated": False,
             "gx_score": 0.5, "verdict": "error",
             "error": str(e),
         }

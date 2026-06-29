@@ -9,8 +9,8 @@
 # `.env.example`) — values placed here will be silently ignored by
 # the docker path. See ISSUES.md PC-021.
 #
-# Copy this file to atlas.conf and customize.
-# All values have sensible defaults.
+# Copy this file to atlas.conf and customize. Model selection is required;
+# hardware/runtime values have sensible defaults.
 #
 # Usage:
 #   cp atlas.conf.example atlas.conf
@@ -79,25 +79,21 @@ ATLAS_PVC_PROJECTS_SIZE="20Gi"     # backs lens-projects PVC in the lens deploym
 #-------------------------------------------
 # Model Configuration
 #-------------------------------------------
-# Main model filename (must exist in ATLAS_MODELS_DIR).
-# As of 3.0.1+ ATLAS targets Qwen3.5-9B-Q6_K (~6.6 GB on disk,
-# ~12 GB active VRAM after KV cache).
-ATLAS_MAIN_MODEL="Qwen3.5-9B-Q6_K.gguf"
+# Main model filename (required; must exist in ATLAS_MODELS_DIR).
+# Pick a registry model with `atlas model recommend`, or provide a BYO GGUF.
+ATLAS_MAIN_MODEL="your-model.gguf"
 
-# Draft model for speculative decoding (download path; gated by
-# ATLAS_ENABLE_SPECULATIVE below). Note: Qwen3.5-9B speculative
-# decoding is disabled at the entrypoint level — llama.cpp can't
-# speculate hybrid DeltaNet+Attention models yet. The draft model
-# is still downloaded so the infrastructure is in place when llama.cpp
-# adds support; it does not affect inference today.
-ATLAS_DRAFT_MODEL="Qwen3-0.6B-Q8_0.gguf"
+# Optional draft model for speculative decoding (gated by
+# ATLAS_ENABLE_SPECULATIVE below). It must be compatible with the selected
+# main model; leave blank unless that pairing has been validated.
+ATLAS_DRAFT_MODEL=""
 
-# Context window size (tokens). V3 uses --parallel 1 with 16384 context;
-# set higher if you have GPU headroom and want longer turns.
+# Context window size (tokens). Size this for the selected model and hardware
+# with `atlas tier fit`; larger values increase KV-cache memory.
 ATLAS_CONTEXT_LENGTH=16384
 
-# Parallel inference slots. V3 requires --parallel 1 (VRAM too tight
-# for 2 draft KV contexts with self-embeddings on a 16 GB card).
+# Parallel inference slots. Each slot consumes KV-cache memory; use
+# `atlas tier fit` instead of assuming a model-family-specific count.
 ATLAS_PARALLEL_SLOTS=1
 
 #-------------------------------------------
@@ -128,10 +124,9 @@ ATLAS_JWT_SECRET="auto"
 #-------------------------------------------
 # Feature Flags
 #-------------------------------------------
-# Enable speculative decoding draft-model download. (Inference-time
-# behavior is currently fixed by the entrypoint; this only gates
-# whether the draft GGUF is downloaded.)
-ATLAS_ENABLE_SPECULATIVE=true
+# Enable speculative decoding only after selecting a draft GGUF explicitly
+# validated as compatible with the main model.
+ATLAS_ENABLE_SPECULATIVE=false
 
 # Continuous learning toggle (reserved — see below).
 # Reserved: nightly lens retraining. The CronJob template was removed —
