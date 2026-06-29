@@ -48,14 +48,12 @@ done
 # llama-server crash with a confusing error.
 # ---------------------------------------------------------------------------
 
-if [[ ! -f "$ATLAS_ROOT/.env" ]]; then
-  echo ".env not found at $ATLAS_ROOT/.env" >&2
-  echo "  Run 'atlas init' first to generate it." >&2
-  exit 1
-fi
-
-# Load .env as defaults without executing it as shell code. Existing process
-# environment wins, matching Compose and the Python CLI configuration policy.
+# Load .env as defaults if present, without executing it as shell code.
+# Existing process environment wins, matching Compose and the Python CLI
+# configuration policy, so a fully env-configured launch (no .env file) is
+# valid. The ATLAS_MODEL_FILE :? guard below still fails with a clear message
+# if required config is missing from both the environment and .env.
+if [[ -f "$ATLAS_ROOT/.env" ]]; then
 while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line#"${line%%[![:space:]]*}"}"
   [[ -z "$line" || "$line" == \#* ]] && continue
@@ -76,6 +74,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   fi
   export "$key=$value"
 done < "$ATLAS_ROOT/.env"
+fi
 
 PREFIX="${PREFIX_OVERRIDE:-${ATLAS_MACOS_PREFIX:-$DEFAULT_PREFIX}}"
 TILDE_PREFIX="$(printf '\176/')"
