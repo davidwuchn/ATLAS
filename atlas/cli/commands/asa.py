@@ -45,6 +45,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import List, Optional
 
+from atlas.cli import compose as compose_config
 from atlas.cli.commands import lens as lens_module  # for shared helpers
 
 
@@ -73,10 +74,14 @@ DEFAULT_HOST_VECTOR_PATH = "/models/" + DEFAULT_VECTOR_NAME  # llama-server view
 DEFAULT_LENS_CONTAINER = "atlas-geometric-lens-1"
 
 
-def _configured_vector_path() -> str:
+def _configured_vector_path(atlas_root: Optional[str] = None) -> str:
     """Path the lens / entrypoint use. Matches the env-var conventions
     in proxy/calibration_status.go's probeASAStatus()."""
-    return os.environ.get("ATLAS_CONTROL_VECTOR", DEFAULT_HOST_VECTOR_PATH)
+    configured = os.environ.get("ATLAS_CONTROL_VECTOR")
+    if not configured and atlas_root:
+        configured = compose_config.read_env_file(atlas_root).get(
+            "ATLAS_CONTROL_VECTOR")
+    return configured or DEFAULT_HOST_VECTOR_PATH
 
 
 def _host_resolve_vector_path(configured: str, atlas_root: str) -> str:
@@ -93,7 +98,9 @@ def _host_resolve_vector_path(configured: str, atlas_root: str) -> str:
         return configured  # the path resolved directly — use it
     if configured.startswith("/models/"):
         # Try ATLAS_MODELS_DIR first, then the default <atlas_root>/models
-        env_dir = os.environ.get("ATLAS_MODELS_DIR")
+        env_dir = (os.environ.get("ATLAS_MODELS_DIR")
+                   or compose_config.read_env_file(atlas_root).get(
+                       "ATLAS_MODELS_DIR"))
         candidates = []
         if env_dir:
             host_dir = (env_dir if os.path.isabs(env_dir)
@@ -244,10 +251,10 @@ def _check_asa(atlas_root: str) -> ASACheckVerdict:
     if not probe.reachable:
         return ASACheckVerdict(
             verdict="incompatible", reason=probe.error, probe=probe,
-            vector_path=_configured_vector_path(),
+            vector_path=_configured_vector_path(atlas_root),
         )
 
-    configured = _configured_vector_path()
+    configured = _configured_vector_path(atlas_root)
     vpath = _host_resolve_vector_path(configured, atlas_root)
     meta = _read_cvector_meta(vpath)
     v = ASACheckVerdict(
@@ -541,12 +548,15 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
         # write to the bind-mounted models dir, not literally /models.
         artifact_dir = args.artifact_dir
         if not artifact_dir:
-            configured = _configured_vector_path()
+            configured = _configured_vector_path(atlas_root)
             resolved = _host_resolve_vector_path(configured, atlas_root)
             if resolved.startswith("/models/"):
                 # No existing host file to anchor the translation (first
                 # build for this model) — target the bind-mount source.
-                env_dir = os.environ.get("ATLAS_MODELS_DIR", "models")
+                env_dir = (os.environ.get("ATLAS_MODELS_DIR")
+                           or compose_config.read_env_file(atlas_root).get(
+                               "ATLAS_MODELS_DIR")
+                           or "models")
                 artifact_dir = (env_dir if os.path.isabs(env_dir)
                                 else os.path.normpath(
                                     os.path.join(atlas_root, env_dir)))
@@ -689,7 +699,7 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
         return 1
 
     atlas_root = _atlas_root()
-    raw = args.vector or _configured_vector_path()
+    raw = args.vector or _configured_vector_path(atlas_root)
     vpath = _host_resolve_vector_path(raw, atlas_root)
     if not os.path.isfile(vpath):
         _safe_print(f"  {RED if color else ''}No control vector at {vpath}. "
@@ -810,7 +820,7 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
     title = (f"Registry: add ASA vector for {model_label} "
              f"(via atlas asa publish)")
     vector_name = os.path.basename(
-        _configured_vector_path()) or "ast_edit_steering.gguf"
+        _configured_vector_path(atlas_root)) or "ast_edit_steering.gguf"
     pr_url = lens_module.open_registry_pr_via_api(
         model_label, title, pr_body,
         lambda content: lens_module._registry_set_asa(

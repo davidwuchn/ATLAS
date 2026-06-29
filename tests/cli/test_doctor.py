@@ -12,9 +12,59 @@ real CI runs. These tests cover the new check_metal_native() added in
      for non-Mac users
 """
 
+import json
 import sys
 
 from atlas.cli.commands import doctor
+
+
+def test_e2e_smoke_uses_public_proxy_path(monkeypatch):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "choices": [{
+                    "message": {"content": "ATLAS"},
+                    "finish_reason": "stop",
+                }],
+            }).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(doctor, "PROXY_URL", "http://proxy.test:8090")
+    monkeypatch.setattr(doctor.urllib.request, "urlopen", fake_urlopen)
+
+    result = doctor.check_e2e_smoke()
+
+    assert result.status == "pass"
+    assert captured["url"] == "http://proxy.test:8090/v1/chat/completions"
+    assert captured["body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert captured["timeout"] == 60
+
+
+def test_health_endpoint_reports_degraded_as_warning(monkeypatch):
+    def fake_get(url, timeout=3):
+        status = "degraded" if url.endswith(":8099/health") else "ok"
+        return True, json.dumps({"status": status})
+
+    monkeypatch.setattr(doctor, "_http_get", fake_get)
+
+    results = {item.name: item for item in doctor.check_health_endpoints()}
+
+    assert results["health/lens"].status == "warn"
+    assert results["health/lens"].message == "degraded"
+    assert results["health/proxy"].status == "pass"
 
 
 def test_check_model_file_requires_explicit_selection(monkeypatch, tmp_path):
@@ -23,6 +73,39 @@ def test_check_model_file_requires_explicit_selection(monkeypatch, tmp_path):
     assert result.status == "fail"
     assert "ATLAS_MODEL_FILE is not configured" in result.message
     assert "atlas init" in result.detail
+
+
+def test_lens_weights_report_legacy_bundle_as_uncalibrated(
+    monkeypatch, tmp_path
+):
+    artifact_dir = tmp_path / "lens"
+    artifact_dir.mkdir()
+    (artifact_dir / "cost_field.pt").write_bytes(b"legacy")
+    (artifact_dir / "metric_tensor.pt").write_bytes(b"legacy")
+    monkeypatch.setenv("ATLAS_LENS_MODELS", str(artifact_dir))
+    monkeypatch.setattr(doctor, "MODEL_NAME", "Qwen3.5-9B-Q6_K")
+    monkeypatch.setattr(doctor, "MODEL_FILE", "Qwen3.5-9B-Q6_K.gguf")
+
+    result = doctor.check_lens_weights(str(tmp_path))
+    assert result.status == "warn"
+    assert "calibrated interventions disabled" in result.message
+    assert "model_identity.json" in result.detail
+
+
+def test_doctor_does_not_pass_unmarked_asa_vector(monkeypatch, tmp_path):
+    from atlas.cli.commands import asa
+
+    verdict = asa.ASACheckVerdict(
+        verdict="needs-build",
+        reason="control vector marker is missing; entrypoint keeps it disabled",
+        vector_path=str(tmp_path / "ast_edit_steering.gguf"),
+        vector_present=True,
+    )
+    monkeypatch.setattr(asa, "_check_asa", lambda root: verdict)
+    result = doctor.check_asa_steering(str(tmp_path))
+    assert result.status == "warn"
+    assert "disabled" in result.message.lower()
+    assert "marker" in result.detail
 
 
 def test_check_metal_native_skips_on_non_darwin(monkeypatch):
@@ -122,6 +205,27 @@ def test_check_metal_native_pass_when_everything_healthy(monkeypatch, tmp_path):
     result = doctor._check_metal_native()
     assert result.status == "pass"
     assert "listening on :8080" in result.message
+
+
+def test_check_metal_native_honors_custom_prefix(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    prefix = tmp_path / "custom-native"
+    bin_dir = prefix / "bin"
+    bin_dir.mkdir(parents=True)
+    binary = bin_dir / "llama-server-metal"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / ".env").write_text(f"ATLAS_MACOS_PREFIX={prefix}\n")
+    monkeypatch.setattr(doctor, "_run",
+                        lambda argv, *args, **kwargs: (0, "", ""))
+    monkeypatch.setattr(doctor, "_port_listening",
+                        lambda host, port, timeout=2.0: True)
+
+    result = doctor._check_metal_native(str(root))
+    assert result.status == "pass"
+    assert str(binary) in result.message
 
 
 def test_check_metal_native_pass_when_llama_help_exits_nonzero(monkeypatch, tmp_path):

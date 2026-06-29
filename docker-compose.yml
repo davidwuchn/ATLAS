@@ -71,15 +71,17 @@ services:
       # behavior; the entrypoint comments confirm --parallel 4 at 40k
       # per slot fits within budget on a 16 GB card.
       - CONTEXT_LENGTH=${ATLAS_CTX_SIZE:-131072}
-      - PARALLEL_SLOTS=${ATLAS_PARALLEL_SLOTS:-4}
+      # Canonical ATLAS_* names take precedence; the nested legacy fallback
+      # keeps .env files generated before the rename working during upgrade.
+      - PARALLEL_SLOTS=${ATLAS_PARALLEL_SLOTS:-${PARALLEL_SLOTS:-4}}
       # Model-aware runtime sizing (PC-208). `atlas tier fit --write`
       # derives these from the GGUF header + GPU VRAM; the defaults
       # match a 16 GB card. The entrypoint runs with --fit off, so a
       # config that doesn't fit fails fast instead of spilling to CPU.
-      - KV_CACHE_TYPE_K=${ATLAS_KV_TYPE_K:-f16}
-      - KV_CACHE_TYPE_V=${ATLAS_KV_TYPE_V:-f16}
+      - KV_CACHE_TYPE_K=${ATLAS_KV_TYPE_K:-${KV_CACHE_TYPE_K:-f16}}
+      - KV_CACHE_TYPE_V=${ATLAS_KV_TYPE_V:-${KV_CACHE_TYPE_V:-f16}}
       - UBATCH_SIZE=${ATLAS_UBATCH:-1024}
-      - BATCH_SIZE=${ATLAS_BATCH:-2048}
+      - BATCH_SIZE=${ATLAS_BATCH:-1024}
 
   # --- Geometric Lens (C(x)/G(x) scoring) ---
   geometric-lens:
@@ -237,7 +239,7 @@ services:
       # token budget derived from per-slot context instead of a
       # blind message count, so a just-read file isn't dropped.
       - ATLAS_CTX_SIZE=${ATLAS_CTX_SIZE:-131072}
-      - ATLAS_PARALLEL_SLOTS=${ATLAS_PARALLEL_SLOTS:-4}
+      - ATLAS_PARALLEL_SLOTS=${ATLAS_PARALLEL_SLOTS:-${PARALLEL_SLOTS:-4}}
       # Redundant-read short-circuit: when "1" (default), a re-read of an
       # unchanged file already in context returns a compact pointer instead
       # of re-injecting the file. Set "0" to always serve the full re-read

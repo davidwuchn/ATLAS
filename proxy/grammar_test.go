@@ -189,6 +189,14 @@ func TestSchemaConstrained_ReachesLlamaServerOverTheWire(t *testing.T) {
 			"the #33 optimization regressed to loose JSON. "+
 			"request body: %v", got)
 	}
+	kwargs, ok := got["chat_template_kwargs"].(map[string]interface{})
+	if !ok || kwargs["enable_thinking"] != false {
+		t.Fatalf("chat_template_kwargs.enable_thinking = %v, want false",
+			got["chat_template_kwargs"])
+	}
+	if _, legacy := got["enable_thinking"]; legacy {
+		t.Fatal("enable_thinking must be nested under chat_template_kwargs")
+	}
 
 	// Strict mode should NOT also send a `grammar` field (mixing the
 	// two confuses llama-server).

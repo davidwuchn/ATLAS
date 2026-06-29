@@ -62,6 +62,18 @@ def test_host_resolve_honors_atlas_models_dir(tmp_path, monkeypatch):
     assert resolved == str(alt / "ast_edit_steering.gguf")
 
 
+def test_host_resolve_reads_models_dir_from_dotenv(tmp_path, monkeypatch):
+    monkeypatch.delenv("ATLAS_MODELS_DIR", raising=False)
+    alt = tmp_path / "dotenv-models"
+    alt.mkdir()
+    vector = alt / "ast_edit_steering.gguf"
+    vector.write_bytes(b"GGUF" + b"\x00" * 100)
+    (tmp_path / ".env").write_text(f"ATLAS_MODELS_DIR={alt}\n")
+    resolved = asa._host_resolve_vector_path(
+        "/models/ast_edit_steering.gguf", str(tmp_path))
+    assert resolved == str(vector)
+
+
 def test_host_resolve_passthrough_when_path_resolves(tmp_path):
     """Already-absolute paths that exist on disk shouldn't be munged."""
     f = tmp_path / "foo.gguf"

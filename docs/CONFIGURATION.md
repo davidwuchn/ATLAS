@@ -35,7 +35,7 @@ These variables are read by `docker-compose.yml` and control host-side port mapp
 | `ATLAS_KV_TYPE_K` | `f16` | KV-cache K quantization (`f16`, `q8_0`, `q4_0`). Set by `atlas tier fit --write`. |
 | `ATLAS_KV_TYPE_V` | `f16` | KV-cache V quantization. Set by `atlas tier fit --write`. |
 | `ATLAS_UBATCH` | `1024` | llama-server micro-batch size (`-ub`). Drives the compute-buffer VRAM cost (~ubatch × n_embd × 280 bytes) — the term that OOMs first on tight cards. Set by `atlas tier fit --write`. |
-| `ATLAS_BATCH` | `2048` | llama-server logical batch size (`-b`). Set by `atlas tier fit --write`. |
+| `ATLAS_BATCH` | `1024` | llama-server logical batch size (`-b`). Must be no larger than `ATLAS_UBATCH` because self-embeddings are always enabled. Set by `atlas tier fit --write`. |
 | `ATLAS_PROJECT_DIR` | (cwd at `compose up`) | Host directory bind-mounted to `/workspace` inside the atlas-proxy container. Switch projects by re-creating the proxy container with this var set. |
 | `ATLAS_GHCR_OWNER` | `itigges22` | GHCR namespace to pull images from. Set to your own GitHub username if you've published forked images. |
 | `ATLAS_IMAGE_TAG` | `latest` | Image tag to pull (`latest` for main, `dev` for the dev branch, `vX.Y.Z` or `sha-...` for pinned releases). |
@@ -47,6 +47,7 @@ These variables are read by `docker-compose.yml` and control host-side port mapp
 | `ATLAS_SANDBOX_PIDS` | `1024` | PID cap on the sandbox container (`docker` `pids_limit`) — a kernel-level fork-bomb stop, far above any normal build and far below a bomb. Constant across hosts, so it defaults inline in compose; override only if a legitimate build needs more concurrent processes. |
 | `ATLAS_PROXY_PORT` | `8090` | atlas-proxy host port (TUI and OpenAI-compat clients connect here) |
 | `ATLAS_BACKEND` | `cuda` | Inference backend. `cuda` (NVIDIA, V3.1.0+), `rocm` (AMD, V3.1.1, x86_64 only), `vulkan` (universal fallback, PC-114), `metal` (Apple Silicon hybrid: native llama-server + Docker for the rest, #32 — see [SETUP_MACOS.md](SETUP_MACOS.md)), `sycl` (Intel Arc, roadmap). Set by `atlas init`; the entrypoint scripts read this to pick per-vendor env vars. ROCm + Vulkan + Metal also require bringing up the stack with `-f docker-compose.rocm.yml`, `-f docker-compose.vulkan.yml`, or `-f docker-compose.macos.yml` respectively (the wizard prints the right command). On aarch64 hosts (DGX Spark, Snapdragon X Elite, Jetson, Pi 5) `atlas init` filters out `rocm` since AMD has no arm64 release — see [SETUP.md § arm64](SETUP.md#arm64) and [#115](https://github.com/itigges22/ATLAS/issues/115). |
+| `ATLAS_MACOS_PREFIX` | `~/.atlas/macos` | macOS Metal only. Native llama.cpp install root shared by setup, launcher, and doctor. Set this when setup used `--prefix`. |
 | `ATLAS_GPU_VENDOR` | (auto-detected) | Vendor of the GPU ATLAS should use: `nvidia`, `amd`, `apple`, `intel`. Only meaningful on multi-vendor hosts; auto-detect picks the largest-VRAM GPU. |
 | `ATLAS_GPU_INDEX` | `0` | Vendor-local index of the GPU ATLAS should use. The entrypoint sets `CUDA_VISIBLE_DEVICES` (NVIDIA) or `HIP_VISIBLE_DEVICES` + `ROCR_VISIBLE_DEVICES` (AMD) from this value. Multi-GPU hosts pick a specific card with this. |
 | `ATLAS_GFX_TARGET` | `gfx1100;gfx1101;gfx1102;gfx1030;gfx90a` | **ROCm only.** AMD compute target(s), semicolon-separated. Forwarded to `Dockerfile.rocm` as `AMDGPU_TARGETS` at build time. Trim to your GPU for a smaller image — see [SETUP.md § AMD GPU Targets](SETUP.md#amd-gpu-targets-dockerfilerocm-v311). |
@@ -54,6 +55,11 @@ These variables are read by `docker-compose.yml` and control host-side port mapp
 | `ATLAS_HSA_OVERRIDE_GFX_VERSION` | (unset) | **ROCm only.** Force a specific HSA gfx version at runtime — workaround for "officially unsupported" GPUs (e.g., older Vega) that still work with a compatible target. Example: `10.3.0` makes RDNA1 cards masquerade as RDNA2 for HIP kernel selection. |
 
 Docker Compose also sets inter-service URLs using Docker networking (e.g., `http://llama-server:8080`). These are fixed inside the Docker network and usually do not need to be configured by users. On macOS Metal, `docker-compose.macos.yml` keeps the container-side URL at `llama-server:8080` but forwards it to the native host-side `${ATLAS_LLAMA_PORT:-8080}`, so the port can move when 8080 is already occupied.
+
+Older `.env` files may still use `PARALLEL_SLOTS` and `KV_CACHE_TYPE_K/V`.
+They remain supported as compatibility fallbacks, but the canonical `ATLAS_*`
+names take precedence and are what `atlas init` and `atlas tier fit --write`
+now generate.
 
 #### Backend-vs-Compose-override matrix
 
@@ -65,7 +71,7 @@ Docker Compose also sets inter-service URLs using Docker networking (e.g., `http
 | `metal` (#32 hybrid) | `./scripts/atlas-llama-macos.sh` + `docker compose -f docker-compose.yml -f docker-compose.macos.yml up -d` |
 | `sycl` | Not yet packaged — Intel Arc users should use `vulkan` for now (see [#27](https://github.com/itigges22/ATLAS/issues/27)) |
 
-`atlas init` prints the right invocation as part of its "Next steps" summary. `atlas-bootstrap.sh` picks it automatically based on `tier.detect_gpu()`.
+`atlas init` prints the right invocation as part of its "Next steps" summary. CLI-managed Compose operations also resolve the overlay from `ATLAS_BACKEND`; `atlas-bootstrap.sh` picks the Linux override automatically from its hardware probe.
 
 ### Adding your own model (drop-in / unregistered)
 
@@ -473,11 +479,11 @@ Both Docker Compose and K3s use the same image with the same entrypoint (`infere
 | `MODEL_PATH` | `/models/${ATLAS_MODEL_FILE}` | `/models/${ATLAS_MAIN_MODEL}` | GGUF path inside the container |
 | `PORT` | `8080` | `${ATLAS_LLAMA_PORT}` (defaults to `8080`) | Listen port |
 | `CONTEXT_LENGTH` | `${ATLAS_CTX_SIZE:-131072}` | `${ATLAS_CONTEXT_LENGTH}` (atlas.conf default `16384`) | Context window in tokens, TOTAL across all slots. Size per model + GPU with `atlas tier fit --write`. |
-| `PARALLEL_SLOTS` | `${ATLAS_PARALLEL_SLOTS:-4}` (compose default `4`) | `${ATLAS_PARALLEL_SLOTS}` (atlas.conf default `1`) | Concurrent request slots. Compose defaults to `4` because the `/demo` split-pane runs V3 (which fans out into 3 parallel PlanSearch candidates) alongside a base-agent session — 4 total concurrent inferences. |
-| `KV_CACHE_TYPE_K` | `${ATLAS_KV_TYPE_K:-f16}` | `f16` (entrypoint default) | KV cache key quantization (`f16`, `q8_0`, `q4_0`). Set by `atlas tier fit --write`. |
-| `KV_CACHE_TYPE_V` | `${ATLAS_KV_TYPE_V:-f16}` | `f16` (entrypoint default) | KV cache value quantization. Set by `atlas tier fit --write`. |
+| `PARALLEL_SLOTS` | `${ATLAS_PARALLEL_SLOTS:-${PARALLEL_SLOTS:-4}}` (compose default `4`) | `${ATLAS_PARALLEL_SLOTS}` (atlas.conf default `1`) | Concurrent request slots. Compose defaults to `4` because the `/demo` split-pane runs V3 (which fans out into 3 parallel PlanSearch candidates) alongside a base-agent session — 4 total concurrent inferences. The nested name is a legacy `.env` fallback. |
+| `KV_CACHE_TYPE_K` | `${ATLAS_KV_TYPE_K:-${KV_CACHE_TYPE_K:-f16}}` | `f16` (entrypoint default) | KV cache key quantization (`f16`, `q8_0`, `q4_0`). Set by `atlas tier fit --write`; the nested name is a legacy fallback. |
+| `KV_CACHE_TYPE_V` | `${ATLAS_KV_TYPE_V:-${KV_CACHE_TYPE_V:-f16}}` | `f16` (entrypoint default) | KV cache value quantization. Set by `atlas tier fit --write`; the nested name is a legacy fallback. |
 | `UBATCH_SIZE` | `${ATLAS_UBATCH:-1024}` | `1024` (entrypoint default) | Micro-batch size (`-ub`). Drives the compute-buffer VRAM cost (~ubatch × n_embd × 280 bytes). Set by `atlas tier fit --write`. |
-| `BATCH_SIZE` | `${ATLAS_BATCH:-2048}` | `2048` (entrypoint default) | Logical batch size (`-b`). Set by `atlas tier fit --write`. |
+| `BATCH_SIZE` | `${ATLAS_BATCH:-1024}` | `1024` (entrypoint default) | Logical batch size (`-b`). Normalized to `UBATCH_SIZE` when larger because self-embeddings require `n_batch <= n_ubatch`. Set by `atlas tier fit --write`. |
 | `SLOT_SAVE_PATH` | `/tmp/slots` | `/tmp/slots` | Slot-save directory used by `/slots/0?action=save` |
 | `ATLAS_CONTROL_VECTOR` | `/models/ast_edit_steering.gguf` | same | ASA control-vector path (requires matching `.model` marker) |
 | `ATLAS_CONTROL_VECTOR_SCALE` | `0.5` | same | Scale applied to the control vector |
@@ -500,7 +506,7 @@ The entrypoint always launches with this flag set (regardless of deployment mode
 | `--port` | `$PORT` | Listen port |
 | `--flash-attn` | `on` | Flash attention |
 | `--mlock` | — | Lock model in RAM (prevents swapping) |
-| `-b` / `-ub` | `$BATCH_SIZE` / `$UBATCH_SIZE` | Batch / micro-batch size (defaults `2048` / `1024`) |
+| `-b` / `-ub` | `$BATCH_SIZE` / `$UBATCH_SIZE` | Batch / micro-batch size (defaults `1024` / `1024`; batch cannot exceed micro-batch while embeddings are enabled) |
 | `--slot-save-path` | `$SLOT_SAVE_PATH` | Where llama-server persists slot state |
 | `--ctx-checkpoints` | `0` | Disable context checkpoints |
 | `--no-cache-prompt` | — | Disable prompt caching (PC-045: prevents cross-session leakage) |

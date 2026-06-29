@@ -18,15 +18,32 @@ mkdir -p "$SLOT_SAVE_PATH"
 CTX_LENGTH="${CONTEXT_LENGTH:-163840}"
 KV_CACHE_K="${KV_CACHE_TYPE_K:-f16}"
 KV_CACHE_V="${KV_CACHE_TYPE_V:-f16}"
-KV_FLAGS="-ctk $KV_CACHE_K -ctv $KV_CACHE_V"
+KV_FLAGS=(-ctk "$KV_CACHE_K" -ctv "$KV_CACHE_V")
 PARALLEL="${PARALLEL_SLOTS:-4}"
 # Batch sizes (PC-208): ubatch drives the compute-buffer size
 # (~ubatch × n_embd × 280 bytes), which is what OOMs first on tight
 # VRAM. `atlas tier fit --write` sizes these per model + GPU.
 UBATCH_SIZE="${UBATCH_SIZE:-1024}"
-BATCH_SIZE="${BATCH_SIZE:-2048}"
+BATCH_SIZE="${BATCH_SIZE:-1024}"
 MODEL_FILE="${MODEL_PATH:?MODEL_PATH must point to the selected GGUF}"
 PORT="${PORT:-8080}"
+
+# Self-embeddings require n_batch <= n_ubatch in llama.cpp. A larger logical
+# batch is silently clamped upstream, so normalize it here and report the
+# value ATLAS actually runs.
+case "$BATCH_SIZE:$UBATCH_SIZE" in
+  *[!0-9:]*|:*|*:)
+    echo "ERROR: BATCH_SIZE and UBATCH_SIZE must be positive integers" >&2
+    exit 1
+    ;;
+esac
+if [ "$BATCH_SIZE" -eq 0 ] || [ "$UBATCH_SIZE" -eq 0 ]; then
+  echo "ERROR: BATCH_SIZE and UBATCH_SIZE must be positive integers" >&2
+  exit 1
+fi
+if [ "$BATCH_SIZE" -gt "$UBATCH_SIZE" ]; then
+  BATCH_SIZE="$UBATCH_SIZE"
+fi
 
 # Backend-specific runtime tuning (V3.1.1 multi-backend support).
 # ATLAS_BACKEND is written into .env by `atlas init`; unset defaults to
@@ -118,7 +135,7 @@ ATLAS_CONTROL_VECTOR="${ATLAS_CONTROL_VECTOR:-/models/ast_edit_steering.gguf}"
 MODEL_BASENAME="$(basename "$MODEL_FILE")"
 MODEL_STEM="${MODEL_BASENAME%.gguf}"
 ATLAS_MODEL_ID="${ATLAS_MODEL_NAME:-$MODEL_STEM}"
-CVECTOR_FLAGS=""
+CVECTOR_FLAGS=()
 CVECTOR_STATUS="not present at $ATLAS_CONTROL_VECTOR — build it via geometric-lens/asa_calibration/README.md"
 if [ -f "$ATLAS_CONTROL_VECTOR" ]; then
   CVECTOR_MARKER="$ATLAS_CONTROL_VECTOR.model"
@@ -131,9 +148,10 @@ if [ -f "$ATLAS_CONTROL_VECTOR" ]; then
      [ "$CVECTOR_MODEL" = "$MODEL_STEM" ] || \
      [ "${ATLAS_CONTROL_VECTOR_ALLOW_UNVERIFIED:-0}" = "1" ]; then
     CVECTOR_SCALE="${ATLAS_CONTROL_VECTOR_SCALE:-0.5}"
-    CVECTOR_FLAGS="--control-vector-scaled $ATLAS_CONTROL_VECTOR:$CVECTOR_SCALE"
+    CVECTOR_FLAGS=(--control-vector-scaled "$ATLAS_CONTROL_VECTOR:$CVECTOR_SCALE")
     if [ -n "$ATLAS_CONTROL_VECTOR_LAYER_RANGE" ]; then
-      CVECTOR_FLAGS="$CVECTOR_FLAGS --control-vector-layer-range $ATLAS_CONTROL_VECTOR_LAYER_RANGE"
+      read -r -a CVECTOR_LAYER_RANGE <<< "$ATLAS_CONTROL_VECTOR_LAYER_RANGE"
+      CVECTOR_FLAGS+=(--control-vector-layer-range "${CVECTOR_LAYER_RANGE[@]}")
     fi
     CVECTOR_STATUS="$ATLAS_CONTROL_VECTOR (model=$CVECTOR_MODEL, scale=$CVECTOR_SCALE${ATLAS_CONTROL_VECTOR_LAYER_RANGE:+, layers=$ATLAS_CONTROL_VECTOR_LAYER_RANGE})"
   else
@@ -154,27 +172,25 @@ echo "  allocation error, the budget above is too large for this GPU: run"
 echo "  'atlas tier fit --write' on the host to size it, then recreate this"
 echo "  container. See docs/TROUBLESHOOTING.md 'Model + KV cache don't fit'."
 
+# Prompt caching stays on so each agent-loop turn can reuse its encoded
+# prefix. Cross-session isolation comes from the proxy erasing the KV slot at
+# session start (PC-045), not from disabling the cache.
 exec /usr/local/bin/llama-server \
   -m "$MODEL_FILE" \
-  -c $CTX_LENGTH \
-  $KV_FLAGS \
-  --parallel $PARALLEL \
+  -c "$CTX_LENGTH" \
+  "${KV_FLAGS[@]}" \
+  --parallel "$PARALLEL" \
   --cont-batching \
   -ngl 99 \
   --fit off \
   --host 0.0.0.0 \
-  --port $PORT \
+  --port "$PORT" \
   --flash-attn on \
   --mlock \
-  -b $BATCH_SIZE \
-  -ub $UBATCH_SIZE \
+  -b "$BATCH_SIZE" \
+  -ub "$UBATCH_SIZE" \
   --slot-save-path "$SLOT_SAVE_PATH" \
   --ctx-checkpoints 0 \
-  `# Prompt caching is ON: each agent-loop turn reuses the prior turn's` \
-  `# encoded prefix instead of re-encoding the whole conversation, which` \
-  `# is what keeps multi-turn sessions fast. Cross-session isolation is` \
-  `# handled by the proxy erasing the KV slot at session start (PC-045),` \
-  `# not by disabling the cache.` \
   --embeddings \
   --jinja \
-  $CVECTOR_FLAGS
+  "${CVECTOR_FLAGS[@]}"

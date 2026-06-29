@@ -83,6 +83,9 @@ Optional flags:
 ./scripts/atlas-setup-macos.sh --prefix /opt/atlas  # install to a different prefix
 ```
 
+For a custom prefix, set `ATLAS_MACOS_PREFIX=/opt/atlas` in `.env` or pass
+`--prefix /opt/atlas` to the launcher. `atlas doctor` reads the same setting.
+
 The build step is the slow one (~5-10 min depending on Mac generation). The setup script skips it on re-runs when the existing binary's stored SHA matches `LLAMA_CPP_REV`.
 
 ### Step 2: Run the wizard
@@ -141,7 +144,7 @@ Stop with Ctrl-C. On stop the docker stack's proxy will start serving 502s until
 docker compose -f docker-compose.yml -f docker-compose.macos.yml up -d
 ```
 
-The macOS overlay swaps the `llama-server` service for a tiny `alpine/socat` container that forwards Docker-internal `llama-server:8080` → `host.docker.internal:${ATLAS_LLAMA_PORT:-8080}` (where the native server you started in Step 3 is listening). The other 4 services (proxy, v3, lens, sandbox) come up unchanged from the base compose file.
+The macOS overlay swaps the `llama-server` service for a pinned `alpine/socat` container that forwards Docker-internal `llama-server:8080` → `host.docker.internal:${ATLAS_LLAMA_PORT:-8080}` (where the native server you started in Step 3 is listening). Its healthcheck tests that complete connection, so dependent services wait until native inference is accepting connections. The other services come up unchanged from the base compose file.
 
 If port 8080 is already occupied, set `ATLAS_LLAMA_PORT` in `.env` or launch with `./scripts/atlas-llama-macos.sh --port 8081`, then bring the compose stack up with the same `ATLAS_LLAMA_PORT` value. The container-side URL remains `http://llama-server:8080`; only the native host-side port changes.
 
@@ -208,10 +211,11 @@ Why this design:
 
 ### `atlas doctor` says `metal-native: fail — native llama-server not found`
 
-You haven't run the setup script, or you ran it with a custom `--prefix` and the doctor check is looking at the default. The check expects the binary at `~/.atlas/macos/bin/llama-server-metal`. Either:
+You haven't run the setup script, or the configured prefix does not match where it was installed. The default binary path is `~/.atlas/macos/bin/llama-server-metal`. Either:
 
 - Run `./scripts/atlas-setup-macos.sh` (no flags)
-- Or symlink: `ln -s /your/custom/prefix/bin/llama-server-metal ~/.atlas/macos/bin/`
+- Or set `ATLAS_MACOS_PREFIX=/your/custom/prefix` in `.env`
+- Or launch explicitly with `./scripts/atlas-llama-macos.sh --prefix /your/custom/prefix`
 
 ### `atlas doctor` says `metal-native: warn — nothing listening on the configured llama port`
 

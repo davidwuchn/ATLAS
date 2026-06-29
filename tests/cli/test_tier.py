@@ -281,7 +281,9 @@ def test_tier_env_vars_excludes_model_keys():
     assert "ATLAS_MODEL_FILE" not in env
     assert "ATLAS_MODEL_NAME" not in env
     assert "ATLAS_CTX_SIZE" in env
-    assert "PARALLEL_SLOTS" in env
+    assert "ATLAS_PARALLEL_SLOTS" in env
+    assert "ATLAS_KV_TYPE_K" in env
+    assert "ATLAS_KV_TYPE_V" in env
 
 
 def test_model_recommendations_for_each_gpu_tier():

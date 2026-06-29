@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFormatDemoModelLabel(t *testing.T) {
@@ -113,4 +114,26 @@ func TestDemoLiveAndOutputViewsUseResolvedTitles(t *testing.T) {
 	assertTitles("live", m.View())
 	m.outputMode = true
 	assertTitles("output", m.View())
+}
+
+func TestDemoPromptStatusDoesNotInventZeroPercentProgress(t *testing.T) {
+	child := &tuiModel{
+		promptTotal:     3000,
+		promptEvalStart: time.Now(),
+	}
+	if got := streamStatus(child, false, false, nil); got != "processing prompt…" {
+		t.Fatalf("status = %q, want indeterminate prompt progress", got)
+	}
+}
+
+func TestDemoPromptStatusUsesRealSlotProgress(t *testing.T) {
+	child := &tuiModel{
+		promptProcessed: 750,
+		promptTotal:     3000,
+		promptPct:       0.25,
+		promptEvalStart: time.Now(),
+	}
+	if got := streamStatus(child, false, false, nil); got != "processing prompt 25%" {
+		t.Fatalf("status = %q, want current wire-format percentage", got)
+	}
 }

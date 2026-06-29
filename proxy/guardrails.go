@@ -28,14 +28,14 @@ import (
 // sanitizeFileContent strips markdown wrappers and prose preamble from
 // content destined for disk. The local model frequently emits:
 //
-//   Looking at the task, I need to create a complete index.html...
+//	Looking at the task, I need to create a complete index.html...
 //
-//   ```html
-//   <!DOCTYPE html>
-//   ...
-//   ```
+//	```html
+//	<!DOCTYPE html>
+//	...
+//	```
 //
-//   This file does X, Y, Z.
+//	This file does X, Y, Z.
 //
 // Without this strip, the whole markdown wrapper lands on disk
 // verbatim — Jinja chokes on `{{ url_for(...) }}` fragments inside a
@@ -302,13 +302,14 @@ func validateRunCommand(cmd, workingDir string) string {
 // Heuristic: skip the check when the original was already small
 // (line-level edits often legitimately shrink), reject when the new
 // payload is clearly a stub. Threshold history:
-//   v1 (May 9 2026): newSize < 32 — model slipped a 32B stub past it
-//   v2 (May 10 morning): bumped to 128 — false-rejected legit
-//     "5KB function refactored to 80B one-liner" case
-//   v3 (current): 64 — catches today's 32B destructive stubs and any
-//     "doctype-only" outputs while leaving room for real one-liner
-//     refactors. Subtler cases (legitimate-shape but bad code) are
-//     V3's job now that ast_edit always routes through it.
+//
+//	v1 (May 9 2026): newSize < 32 — model slipped a 32B stub past it
+//	v2 (May 10 morning): bumped to 128 — false-rejected legit
+//	  "5KB function refactored to 80B one-liner" case
+//	v3 (current): 64 — catches today's 32B destructive stubs and any
+//	  "doctype-only" outputs while leaving room for real one-liner
+//	  refactors. Subtler cases (legitimate-shape but bad code) are
+//	  V3's job now that ast_edit always routes through it.
 func validateNotSuspiciouslyShrunk(toolName, path string, oldSize, newSize int) string {
 	if oldSize < 100 {
 		return ""
@@ -430,7 +431,8 @@ var verificationCommandRe = regexp.MustCompile(
 		// Test runners
 		`pytest|python\s+-m\s+pytest|nose|tox|` +
 		// Build / type-check / static analysis
-		`mypy|ruff|pylint|tsc|eslint|gofmt|vet|` +
+		`mypy|ruff|pylint|tsc|eslint|gofmt|vet|markdownlint|stylelint|` +
+		`shellcheck|hadolint|flake8|rubocop|golangci-lint|` +
 		// Run-the-thing
 		`python|python3|node|deno|bun|ruby|cargo\s+run|cargo\s+test|cargo\s+check|cargo\s+build|` +
 		`go\s+run|go\s+test|go\s+build|go\s+vet|` +

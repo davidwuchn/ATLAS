@@ -126,10 +126,10 @@ func TestValidateShellCommandAllowsFileManagement(t *testing.T) {
 		"mv templates venv/templates",
 		"cp old.py new.py",
 		"cd /workspace && mv app.py src/",
-		"rm app.py",                  // delete a specific file
-		"rm -f stale.pyc",            // forced, but not recursive
-		"rm -rf __pycache__",         // recursive, but a named subdir
-		"rm -rf node_modules build",  // named subdirs
+		"rm app.py",                 // delete a specific file
+		"rm -f stale.pyc",           // forced, but not recursive
+		"rm -rf __pycache__",        // recursive, but a named subdir
+		"rm -rf node_modules build", // named subdirs
 		"mkdir -p static/js",
 		"chmod +x run.sh",
 		"sed -i 's/foo/bar/' app.py", // in-place content edit via shell
@@ -371,8 +371,8 @@ func TestValidateNotSuspiciouslyShrunkRejectsDestructiveStub(t *testing.T) {
 
 func TestValidateNotSuspiciouslyShrunkAllowsLegitEdits(t *testing.T) {
 	cases := []struct {
-		name             string
-		old, new         int
+		name     string
+		old, new int
 	}{
 		{"original below threshold (line edit)", 50, 5},
 		{"genuine small change", 200, 150},
@@ -415,51 +415,51 @@ func TestValidateNotSuspiciouslyShrunkRejectionMessage(t *testing.T) {
 // duplicated doctype. This test locks the strip behaviour.
 func TestStripLeadingDoctype(t *testing.T) {
 	cases := []struct {
-		name    string
-		in      string
-		want    string
+		name     string
+		in       string
+		want     string
 		stripped bool
 	}{
 		{
-			name: "html5 doctype",
-			in:   "<!DOCTYPE html>\n<html><body></body></html>",
-			want: "<html><body></body></html>",
+			name:     "html5 doctype",
+			in:       "<!DOCTYPE html>\n<html><body></body></html>",
+			want:     "<html><body></body></html>",
 			stripped: true,
 		},
 		{
-			name: "html5 doctype lowercase",
-			in:   "<!doctype html>\n<html></html>",
-			want: "<html></html>",
+			name:     "html5 doctype lowercase",
+			in:       "<!doctype html>\n<html></html>",
+			want:     "<html></html>",
 			stripped: true,
 		},
 		{
-			name: "doctype with leading whitespace",
-			in:   "  \n<!DOCTYPE html>\n<html></html>",
-			want: "<html></html>",
+			name:     "doctype with leading whitespace",
+			in:       "  \n<!DOCTYPE html>\n<html></html>",
+			want:     "<html></html>",
 			stripped: true,
 		},
 		{
-			name: "no doctype",
-			in:   "<html><body></body></html>",
-			want: "<html><body></body></html>",
+			name:     "no doctype",
+			in:       "<html><body></body></html>",
+			want:     "<html><body></body></html>",
 			stripped: false,
 		},
 		{
-			name: "doctype not at start (after content)",
-			in:   "<html><!DOCTYPE html><body></body></html>",
-			want: "<html><!DOCTYPE html><body></body></html>",
+			name:     "doctype not at start (after content)",
+			in:       "<html><!DOCTYPE html><body></body></html>",
+			want:     "<html><!DOCTYPE html><body></body></html>",
 			stripped: false,
 		},
 		{
-			name: "verbose html4 doctype",
-			in:   `<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN">` + "\n<html></html>",
-			want: "<html></html>",
+			name:     "verbose html4 doctype",
+			in:       `<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN">` + "\n<html></html>",
+			want:     "<html></html>",
 			stripped: true,
 		},
 		{
-			name: "empty content",
-			in:   "",
-			want: "",
+			name:     "empty content",
+			in:       "",
+			want:     "",
 			stripped: false,
 		},
 	}
@@ -571,6 +571,9 @@ func TestIsVerificationCommand(t *testing.T) {
 		"make test",
 		"ruff check src/",
 		"mypy app.py",
+		"markdownlint README.md",
+		"shellcheck scripts/setup.sh",
+		"golangci-lint run ./...",
 	}
 	for _, cmd := range verifies {
 		if !isVerificationCommand(cmd) {
@@ -763,7 +766,7 @@ func TestResolveAgentPathStripsWorkspacePrefix(t *testing.T) {
 		{"workspace/app.py", "/workspace/app.py"},
 		{"workspace", "/workspace"},
 		{"./workspace/app.py", "/workspace/app.py"},
-		{"app.py", "/workspace/app.py"},          // no prefix → unchanged
+		{"app.py", "/workspace/app.py"}, // no prefix → unchanged
 		{"src/main.go", "/workspace/src/main.go"},
 	}
 	for _, tc := range cases {

@@ -11,6 +11,7 @@ atlas = "atlas.cli.repl:run"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
 
 [build-system]
 requires = ["setuptools>=64"]

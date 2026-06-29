@@ -685,8 +685,16 @@ func streamStatus(child *tuiModel, done, everStreamed bool, err error) string {
 	if everStreamed {
 		return "streaming…"
 	}
-	if child.promptTotal > 0 && child.promptPct < 100 {
-		return fmt.Sprintf("processing prompt %.0f%%", child.promptPct)
+	// total is always pre-filled from the chars/4 estimate. Only show a
+	// percentage when llama.cpp also exposes a non-zero processed count;
+	// current builds omit those /slots counters, and "0%" for an entire
+	// Metal prompt encode is confidently wrong rather than useful progress.
+	if child.promptProcessed > 0 && child.promptTotal > 0 &&
+		child.promptPct > 0 && child.promptPct < 1 {
+		return fmt.Sprintf("processing prompt %.0f%%", child.promptPct*100)
+	}
+	if !child.promptEvalStart.IsZero() {
+		return "processing prompt…"
 	}
 	return "waiting…"
 }

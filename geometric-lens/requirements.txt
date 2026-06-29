@@ -1,5 +1,8 @@
 numpy>=1.26
-xgboost>=2.0
+# Linux containers use XGBoost's minimal CPU distribution. The ordinary
+# package now pulls NCCL even on arm64; Lens never executes GPU algorithms.
+xgboost-cpu==2.1.4; sys_platform == "linux"
+xgboost==2.1.4; sys_platform != "linux"
 fastapi==0.109.0
 uvicorn==0.27.0
 pydantic==2.5.3
@@ -12,5 +15,7 @@ tiktoken==0.5.2
 redis>=5.0.0
 tree-sitter>=0.23.0
 tree-sitter-python>=0.23.0
---extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.10.0
+# Dockerfile installs this pinned version from PyTorch's CPU-only index before
+# resolving the rest of this file. Keeping the requirement here documents the
+# runtime contract and lets pip verify the preinstalled wheel satisfies it.
+torch==2.10.0

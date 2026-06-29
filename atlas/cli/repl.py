@@ -15,7 +15,7 @@ import signal
 import atexit
 from typing import Optional, List
 
-from atlas.cli import display, client
+from atlas.cli import client, compose as compose_config, display
 from atlas.cli.commands import solve, status, bench
 
 
@@ -90,7 +90,7 @@ def _build_proxy(atlas_dir: str) -> Optional[str]:
     output = os.path.expanduser("~/.local/bin/atlas-proxy-v2")
     os.makedirs(os.path.dirname(output), exist_ok=True)
 
-    print(f"  Building atlas-proxy from source...")
+    print("  Building atlas-proxy from source...")
     try:
         result = subprocess.run(
             [go_bin, "build", "-o", output, "."],
@@ -346,11 +346,10 @@ def _recreate_docker_proxy(atlas_dir: str, project_dir: str) -> bool:
     env["ATLAS_PROJECT_DIR"] = project_dir
     try:
         result = subprocess.run(
-            [
-                "docker", "compose", "up", "-d",
-                "atlas-proxy", "sandbox",
+            compose_config.command(atlas_dir, [
+                "up", "-d", "atlas-proxy", "sandbox",
                 "--no-deps", "--no-build", "--force-recreate",
-            ],
+            ]),
             cwd=atlas_dir, env=env,
             capture_output=True, text=True, timeout=60,
         )
@@ -424,7 +423,7 @@ def _docker_compose_owns_proxy(atlas_dir: Optional[str]) -> bool:
         return False
     try:
         result = subprocess.run(
-            ["docker", "compose", "config", "--services"],
+            compose_config.command(atlas_dir, ["config", "--services"]),
             cwd=atlas_dir, capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -474,7 +473,7 @@ def _ensure_proxy() -> bool:
     if _docker_compose_owns_proxy(atlas_dir):
         # The stack is configured. Wait for the proxy to bind — it
         # may be mid-startup (we polled too early).
-        print(f"  Docker compose stack owns atlas-proxy. Waiting for it to come up...")
+        print("  Docker compose stack owns atlas-proxy. Waiting for it to come up...")
         if _wait_for_proxy(timeout=60):
             print(f"  Proxy responded on port {PROXY_PORT}")
             _align_workspace(atlas_dir)
@@ -482,17 +481,10 @@ def _ensure_proxy() -> bool:
         # Still nothing after 60s — the stack probably isn't running.
         # Tell the user how to start it instead of silently launching a
         # local proxy that would collide later.
-        print(f"  Proxy never responded. The docker stack is probably not running.")
-        print(f"  Start it with one of:")
-        print(f"    docker compose up -d                                      "
-              f"# Linux + NVIDIA")
-        print(f"    docker compose -f docker-compose.yml "
-              f"-f docker-compose.rocm.yml up -d   # Linux + AMD")
-        print(f"    docker compose -f docker-compose.yml "
-              f"-f docker-compose.vulkan.yml up -d # Vulkan")
-        print(f"    docker compose -f docker-compose.yml "
-              f"-f docker-compose.macos.yml up -d  # macOS hybrid (#32)")
-        print(f"  Then re-run atlas.")
+        print("  Proxy never responded. The docker stack is probably not running.")
+        print("  Start it with:")
+        print(f"    {compose_config.format_command(atlas_dir, ['up', '-d'])}")
+        print("  Then re-run atlas.")
         return False
 
     # Try to find or build and launch locally (dev workflow, no docker).

@@ -56,6 +56,32 @@ func stripThinkTags(s string) string {
 	return strings.TrimSpace(thinkTagRE.ReplaceAllString(s, ""))
 }
 
+// recoverStructuredReasoning accepts a complete agent envelope that a chat
+// template routed to reasoning_content instead of content. Parse the JSON
+// rather than matching serialized substrings: whitespace and key order are
+// insignificant, and both `text` and `done` are valid terminal responses.
+func recoverStructuredReasoning(s string) (string, bool) {
+	recovered := stripThinkTags(s)
+	if recovered == "" {
+		return "", false
+	}
+	parsed, err := extractModelResponse(recovered)
+	if err != nil {
+		return "", false
+	}
+	switch parsed.Type {
+	case "tool_call":
+		return recovered, parsed.Name != "" && len(parsed.Args) > 0 &&
+			string(parsed.Args) != "null"
+	case "text":
+		return recovered, parsed.Content != ""
+	case "done":
+		return recovered, parsed.Summary != ""
+	default:
+		return "", false
+	}
+}
+
 // activeSessions tracks in-flight /v1/agent turns by session_id so
 // /cancel can abort them. Map value is the context.CancelFunc returned
 // from the per-request context.WithCancel wrapper. PC-062 step 5.
@@ -1424,7 +1450,7 @@ func eraseLlamaSlot(ctx *AgentContext) {
 	log.Printf("[PC-045] erased %d/%d llama slots — fresh KV cache for this session", erased, slots)
 }
 
-// pollPromptProgress emits llm_prompt_progress events at 250ms cadence
+// pollPromptProgress emits llm_prompt_progress events at 100ms cadence
 // while llama-server is in the prompt-eval phase of a streaming chat
 // completion. Without these events the TUI freezes on "encoding prompt…"
 // for the 30–90s prompt-eval window on long histories.
@@ -1648,7 +1674,7 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 		// combination outright once a trailing assistant message looks
 		// like a "response prefill" (400: "Assistant response prefill is
 		// incompatible with enable_thinking"). Disable explicitly.
-		"enable_thinking": false,
+		"chat_template_kwargs": map[string]bool{"enable_thinking": false},
 	}
 	if grammar != "" {
 		// Token-level restriction wins over response_format. llama-server
@@ -1908,22 +1934,15 @@ func callLLMOnceWithGrammar(ctx *AgentContext, messages []AgentMessage, temperat
 		// call now" message instead of treating prose as a failed
 		// response.
 		if reasoningBuf.Len() > 0 {
-			recovered := stripThinkTags(reasoningBuf.String())
-			containsToolCall := strings.Contains(recovered, `"type":"tool_call"`) ||
-				strings.Contains(recovered, `"type": "tool_call"`) ||
-				strings.Contains(recovered, `"type":"text"`) ||
-				strings.Contains(recovered, `"type":"done"`)
-			if containsToolCall {
-				log.Printf("[agent] PC-043 follow-up: empty content but %d chars of reasoning_content with embedded tool_call — recovering as response",
+			if recovered, ok := recoverStructuredReasoning(reasoningBuf.String()); ok {
+				log.Printf("[agent] PC-043 follow-up: empty content but %d chars of reasoning_content contained a structured agent response — recovering",
 					reasoningBuf.Len())
-				if recovered != "" {
-					return recovered, totalTokens, nil
-				}
+				return recovered, totalTokens, nil
 			}
 			// Pure prose narration in reasoning_content with no tool
 			// call. Don't return it — let the caller retry. Logged so
 			// the failure mode stays visible.
-			log.Printf("[agent] PC-043 follow-up: %d chars of reasoning_content was pure narration (no tool_call envelope) — discarding so caller can re-prompt",
+			log.Printf("[agent] PC-043 follow-up: %d chars of reasoning_content had no valid agent envelope — discarding so caller can re-prompt",
 				reasoningBuf.Len())
 		}
 		// Truly nothing (or only narration). Caller's empty-response

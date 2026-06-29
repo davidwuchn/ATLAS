@@ -43,6 +43,7 @@ import urllib.request
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional
 
+from atlas.cli import compose as compose_config
 from atlas.cli.commands import model_registry
 
 
@@ -382,6 +383,13 @@ def _atlas_root() -> str:
     return os.path.abspath(os.getcwd())
 
 
+def _configured_lens_models_dir(atlas_root: str) -> Optional[str]:
+    """Resolve the host Lens artifact override with shell-env precedence."""
+    return (os.environ.get("ATLAS_LENS_MODELS")
+            or compose_config.read_env_file(atlas_root).get(
+                "ATLAS_LENS_MODELS"))
+
+
 def _check_model(arg: Optional[str], atlas_root: str) -> CheckVerdict:
     """The actual probe + verdict logic. Pure function for testability."""
     probe = probe_llama()
@@ -414,7 +422,7 @@ def _check_model(arg: Optional[str], atlas_root: str) -> CheckVerdict:
     if matched and matched.lens_status == "supported":
         artifact_dir = model_registry.lens_artifact_dir_for(matched, atlas_root)
     else:
-        env = os.environ.get("ATLAS_LENS_MODELS")
+        env = _configured_lens_models_dir(atlas_root)
         if env:
             artifact_dir = env if os.path.isabs(env) else \
                 os.path.normpath(os.path.join(atlas_root, env))
@@ -1814,7 +1822,7 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
     elif matched and matched.lens_status == "supported":
         artifact_dir = model_registry.lens_artifact_dir_for(matched, atlas_root)
     else:
-        env = os.environ.get("ATLAS_LENS_MODELS")
+        env = _configured_lens_models_dir(atlas_root)
         artifact_dir = env or os.path.normpath(os.path.join(
             atlas_root, "geometric-lens", "geometric_lens", "models"))
 

@@ -14,6 +14,7 @@
 # Usage:
 #   ./scripts/atlas-llama-macos.sh
 #   ./scripts/atlas-llama-macos.sh --port 8081       # override port
+#   ./scripts/atlas-llama-macos.sh --prefix DIR      # custom native install
 #   ./scripts/atlas-llama-macos.sh --rebuild         # re-run setup first
 
 set -euo pipefail
@@ -21,16 +22,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ATLAS_ROOT="$(dirname "$SCRIPT_DIR")"
 DEFAULT_PREFIX="$HOME/.atlas/macos"
-LLAMA_SERVER="$DEFAULT_PREFIX/bin/llama-server-metal"
 
 # Flag parsing — just the user-facing ones, everything else comes from .env
 OVERRIDE_PORT=""
+PREFIX_OVERRIDE=""
+REBUILD=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --port) OVERRIDE_PORT="$2"; shift 2;;
-    --rebuild)
-      bash "$SCRIPT_DIR/atlas-setup-macos.sh" --rebuild
-      shift;;
+    --port)
+      [[ $# -ge 2 ]] || { echo "--port requires a value" >&2; exit 2; }
+      OVERRIDE_PORT="$2"; shift 2;;
+    --prefix)
+      [[ $# -ge 2 ]] || { echo "--prefix requires a value" >&2; exit 2; }
+      PREFIX_OVERRIDE="$2"; shift 2;;
+    --rebuild) REBUILD=1; shift;;
     -h|--help)
       sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0;;
@@ -43,24 +48,51 @@ done
 # llama-server crash with a confusing error.
 # ---------------------------------------------------------------------------
 
-if [[ ! -x "$LLAMA_SERVER" ]]; then
-  echo "native llama-server not found at $LLAMA_SERVER" >&2
-  echo "  Run ./scripts/atlas-setup-macos.sh first." >&2
-  exit 1
-fi
-
 if [[ ! -f "$ATLAS_ROOT/.env" ]]; then
   echo ".env not found at $ATLAS_ROOT/.env" >&2
   echo "  Run 'atlas init' first to generate it." >&2
   exit 1
 fi
 
-# Load .env (export every assignment for the subshell). Use `set -a` so
-# vars get exported automatically.
-set -a
-# shellcheck disable=SC1091
-source "$ATLAS_ROOT/.env"
-set +a
+# Load .env as defaults without executing it as shell code. Existing process
+# environment wins, matching Compose and the Python CLI configuration policy.
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line#"${line%%[![:space:]]*}"}"
+  [[ -z "$line" || "$line" == \#* ]] && continue
+  [[ "$line" == export\ * ]] && line="${line#export }"
+  [[ "$line" == *=* ]] || continue
+  key="${line%%=*}"
+  value="${line#*=}"
+  key="${key%"${key##*[![:space:]]}"}"
+  [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+  if printenv "$key" >/dev/null 2>&1; then
+    continue
+  fi
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [[ ( "$value" == \"*\" && "$value" == *\" ) ||
+        ( "$value" == \'*\' && "$value" == *\' ) ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  export "$key=$value"
+done < "$ATLAS_ROOT/.env"
+
+PREFIX="${PREFIX_OVERRIDE:-${ATLAS_MACOS_PREFIX:-$DEFAULT_PREFIX}}"
+TILDE_PREFIX="$(printf '\176/')"
+if [[ "$PREFIX" == "$TILDE_PREFIX"* ]]; then
+  PREFIX="$HOME/${PREFIX:2}"
+fi
+LLAMA_SERVER="$PREFIX/bin/llama-server-metal"
+
+if [[ $REBUILD -eq 1 ]]; then
+  bash "$SCRIPT_DIR/atlas-setup-macos.sh" --rebuild --prefix "$PREFIX"
+fi
+
+if [[ ! -x "$LLAMA_SERVER" ]]; then
+  echo "native llama-server not found at $LLAMA_SERVER" >&2
+  echo "  Run ./scripts/atlas-setup-macos.sh --prefix '$PREFIX' first." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Resolve the runtime knobs. Mirrors inference/entrypoint-v3.1.sh
@@ -68,13 +100,27 @@ set +a
 # ---------------------------------------------------------------------------
 
 CTX_LENGTH="${ATLAS_CTX_SIZE:-${CONTEXT_LENGTH:-32768}}"
-KV_CACHE_K="${KV_CACHE_TYPE_K:-q8_0}"
-KV_CACHE_V="${KV_CACHE_TYPE_V:-q4_0}"
-PARALLEL="${PARALLEL_SLOTS:-1}"
-BATCH_SIZE="${BATCH_SIZE:-2048}"
-UBATCH_SIZE="${UBATCH_SIZE:-1024}"
+KV_CACHE_K="${ATLAS_KV_TYPE_K:-${KV_CACHE_TYPE_K:-q8_0}}"
+KV_CACHE_V="${ATLAS_KV_TYPE_V:-${KV_CACHE_TYPE_V:-q4_0}}"
+PARALLEL="${ATLAS_PARALLEL_SLOTS:-${PARALLEL_SLOTS:-1}}"
+BATCH_SIZE="${ATLAS_BATCH:-${BATCH_SIZE:-1024}}"
+UBATCH_SIZE="${ATLAS_UBATCH:-${UBATCH_SIZE:-1024}}"
 PORT="${OVERRIDE_PORT:-${ATLAS_LLAMA_PORT:-8080}}"
 HOST="${ATLAS_LLAMA_HOST:-127.0.0.1}"
+
+case "$BATCH_SIZE:$UBATCH_SIZE" in
+  *[!0-9:]*|:*|*:)
+    echo "ATLAS_BATCH and ATLAS_UBATCH must be positive integers" >&2
+    exit 1
+    ;;
+esac
+if [[ "$BATCH_SIZE" -eq 0 || "$UBATCH_SIZE" -eq 0 ]]; then
+  echo "ATLAS_BATCH and ATLAS_UBATCH must be positive integers" >&2
+  exit 1
+fi
+if [[ "$BATCH_SIZE" -gt "$UBATCH_SIZE" ]]; then
+  BATCH_SIZE="$UBATCH_SIZE"
+fi
 
 # Resolve model path. ATLAS_MODELS_DIR is "./models" (relative to atlas root)
 # or an absolute path. ATLAS_MODEL_FILE is the .gguf filename.
@@ -165,21 +211,28 @@ EOF
 SLOT_SAVE_PATH="${TMPDIR:-/tmp}/atlas-slots"
 mkdir -p "$SLOT_SAVE_PATH"
 
-exec "$LLAMA_SERVER" \
-  -m "$MODEL_FILE" \
-  -c "$CTX_LENGTH" \
-  -ctk "$KV_CACHE_K" -ctv "$KV_CACHE_V" \
-  --parallel "$PARALLEL" \
-  --cont-batching \
-  -ngl 99 \
-  --host "$HOST" \
-  --port "$PORT" \
-  --flash-attn on \
-  --fit off \
-  -b "$BATCH_SIZE" \
-  -ub "$UBATCH_SIZE" \
-  --slot-save-path "$SLOT_SAVE_PATH" \
-  --ctx-checkpoints 0 \
-  --embeddings \
-  --jinja \
-  "${CVECTOR_FLAGS[@]}"
+SERVER_ARGS=(
+  -m "$MODEL_FILE"
+  -c "$CTX_LENGTH"
+  -ctk "$KV_CACHE_K" -ctv "$KV_CACHE_V"
+  --parallel "$PARALLEL"
+  --cont-batching
+  -ngl 99
+  --host "$HOST"
+  --port "$PORT"
+  --flash-attn on
+  --fit off
+  -b "$BATCH_SIZE"
+  -ub "$UBATCH_SIZE"
+  --slot-save-path "$SLOT_SAVE_PATH"
+  --ctx-checkpoints 0
+  --embeddings
+  --jinja
+)
+# Bash 3.2 (the version shipped by macOS) errors under `set -u` when an empty
+# array is expanded directly, so append the optional ASA flags conditionally.
+if (( ${#CVECTOR_FLAGS[@]} )); then
+  SERVER_ARGS+=("${CVECTOR_FLAGS[@]}")
+fi
+
+exec "$LLAMA_SERVER" "${SERVER_ARGS[@]}"

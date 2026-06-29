@@ -406,6 +406,16 @@ def test_lens_artifact_dir_for_honors_atlas_lens_models_env(monkeypatch, tmp_pat
     assert d == str(tmp_path)
 
 
+def test_lens_artifact_dir_for_reads_compose_dotenv(monkeypatch, tmp_path):
+    monkeypatch.delenv("ATLAS_LENS_MODELS", raising=False)
+    artifact_dir = tmp_path / "external-lens"
+    (tmp_path / ".env").write_text(
+        f"ATLAS_LENS_MODELS={artifact_dir}\n")
+    m = model_registry.by_name("Qwen3.5-9B-Q6_K")
+    assert model_registry.lens_artifact_dir_for(m, str(tmp_path)) == str(
+        artifact_dir)
+
+
 def test_lens_artifacts_present_ok_when_files_exist(tmp_path):
     """Set up a fake artifact dir with the required .pt files, point
     ATLAS_LENS_MODELS at it, expect ok=True."""

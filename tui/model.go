@@ -80,12 +80,12 @@ type tuiModel struct {
 	maxLines int
 
 	// Chat
-	input          textarea.Model
-	chat           []chatMessage
-	chatEvents     chan chatEvent
-	turnActive     bool
-	turnCancel     context.CancelFunc
-	turnSessionID  string
+	input         textarea.Model
+	chat          []chatMessage
+	chatEvents    chan chatEvent
+	turnActive    bool
+	turnCancel    context.CancelFunc
+	turnSessionID string
 	// lastPassSession is the session id of the most recently COMPLETED pass —
 	// what /good and /bad rate. Distinct from turnSessionID (which a new turn
 	// overwrites at send time); set when a turn finishes.
@@ -98,11 +98,11 @@ type tuiModel struct {
 	// lists and /good·/bad rate). passVerdicts holds per-file deny verdicts the
 	// user set for the last pass (path → "deny"), with optional reasons for
 	// /redo. All cleared when a new pass starts.
-	passWrites   map[string]bool
+	passWrites    map[string]bool
 	lastPassFiles []string
-	passVerdicts map[string]string
-	passReasons  map[string]string
-	chatRenderer *glamour.TermRenderer
+	passVerdicts  map[string]string
+	passReasons   map[string]string
+	chatRenderer  *glamour.TermRenderer
 
 	// Set when the user presses Ctrl+C mid-turn so the trailing flurry
 	// of error/llm_call_end/__turn_done__ events render as "cancelled"
@@ -118,8 +118,8 @@ type tuiModel struct {
 	// (OSC52 fallback works over SSH). Cell coords are screen-relative.
 	// We only copy when there was a real drag (non-zero delta), so a
 	// pure click doesn't trigger a copy.
-	selecting          bool
-	selPane            string // "chat" / "events" / "pipeline" / "files"
+	selecting            bool
+	selPane              string // "chat" / "events" / "pipeline" / "files"
 	selStartX, selStartY int
 	selEndX, selEndY     int
 
@@ -162,7 +162,7 @@ type tuiModel struct {
 
 	// Prompt-eval progress. While llama-server is encoding the prompt
 	// (before the first decoded token arrives), the proxy polls /slots
-	// every 250ms and emits llm_prompt_progress with processed/total/pct.
+	// every 100ms and emits llm_prompt_progress with processed/total/pct.
 	// We render this as the body of the streaming row instead of a static
 	// "encoding prompt…" line. Cleared on llm_first_token / llm_call_end.
 	promptProcessed int
@@ -784,9 +784,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selStartY, m.selEndY,
 					m.selStartX, m.selEndX)
 				dlog("mouse", "release", map[string]interface{}{
-					"pane":     selPane,
-					"startX":   m.selStartX, "startY": m.selStartY,
-					"endX":     m.selEndX, "endY": m.selEndY,
+					"pane":   selPane,
+					"startX": m.selStartX, "startY": m.selStartY,
+					"endX": m.selEndX, "endY": m.selEndY,
 					"text_len": len(text),
 					"preview":  truncate(text, 60),
 				})
@@ -1623,18 +1623,18 @@ func (m *tuiModel) appendChatEvent(ev chatEvent) {
 // pane is the place to show timelines and counters in detail.
 func formatV3StageEvent(eventType string, data json.RawMessage) string {
 	var p struct {
-		Stage     string  `json:"stage"`
-		Detail    string  `json:"detail"`
-		Index     int     `json:"index"`
-		ElapsedMS int     `json:"elapsed_ms"`
-		Energy    float64 `json:"energy"`
-		Passed    int     `json:"passed"`
-		Total     int     `json:"total"`
-		K         int     `json:"k"`
-		Plans     int     `json:"plans"`
-		Slots     int     `json:"slots"`
-		Tier      string  `json:"tier"`
-		Strategy  string  `json:"strategy"`
+		Stage      string  `json:"stage"`
+		Detail     string  `json:"detail"`
+		Index      int     `json:"index"`
+		ElapsedMS  int     `json:"elapsed_ms"`
+		Energy     float64 `json:"energy"`
+		Passed     int     `json:"passed"`
+		Total      int     `json:"total"`
+		K          int     `json:"k"`
+		Plans      int     `json:"plans"`
+		Slots      int     `json:"slots"`
+		Tier       string  `json:"tier"`
+		Strategy   string  `json:"strategy"`
 		Iterations int     `json:"iterations"`
 		Tokens     int     `json:"tokens"`
 		Failing    int     `json:"failing"`
@@ -1814,10 +1814,10 @@ func formatCallChainContext(data json.RawMessage) string {
 // V3 actually rejected the candidate, not informational telemetry.
 func formatStructuralVeto(data json.RawMessage) string {
 	var p struct {
-		Index            int      `json:"index"`
-		NUnresolved      int      `json:"n_unresolved"`
-		UnresolvedCalls  []string `json:"unresolved_calls"`
-		NCallsTotal      int      `json:"n_calls_total"`
+		Index           int      `json:"index"`
+		NUnresolved     int      `json:"n_unresolved"`
+		UnresolvedCalls []string `json:"unresolved_calls"`
+		NCallsTotal     int      `json:"n_calls_total"`
 	}
 	if err := json.Unmarshal(data, &p); err != nil {
 		return ""
@@ -2108,7 +2108,7 @@ func looksCancelled(err string) bool {
 // others don't) we render a 24-cell bar plus the running counters.
 // When only elapsed time is known, we render a spinner + timer + the
 // chars/4 estimate so the user sees motion and rough magnitude. The
-// proxy emits one of these every 250ms while llama-server is grinding
+// proxy emits one of these every 100ms while llama-server is grinding
 // through prompt eval (30–90s on long histories).
 func formatPromptProgress(processed, total int, pct float64, elapsedMS int64) string {
 	secs := float64(elapsedMS) / 1000.0
@@ -2360,10 +2360,10 @@ var lastChatTotalRendered int
 //	lines     — the full flattened pane content, pre-window. Already
 //	            ANSI-styled; consumers strip ANSI before clipboard.
 type paneSnapshot struct {
-	name                       string
+	name                         string
 	topY, bottomY, leftX, rightX int
-	viewStart                  int
-	lines                      []string
+	viewStart                    int
+	lines                        []string
 }
 
 // paneSnaps holds the most recent layout's pane bounds. Single TUI

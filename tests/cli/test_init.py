@@ -72,7 +72,8 @@ def test_yes_skip_download_writes_env_and_keys(tmp_path, monkeypatch, capsys):
     # Wizard must write every key the compose stack reads at boot.
     for key in ("ATLAS_MODELS_DIR", "ATLAS_MODEL_FILE", "ATLAS_MODEL_NAME",
                 "ATLAS_CTX_SIZE", "ATLAS_GHCR_OWNER", "ATLAS_IMAGE_TAG",
-                "ATLAS_LLAMA_PORT", "PARALLEL_SLOTS",
+                "ATLAS_LLAMA_PORT", "ATLAS_PARALLEL_SLOTS",
+                "ATLAS_KV_TYPE_K", "ATLAS_KV_TYPE_V",
                 "ATLAS_BACKEND", "ATLAS_GPU_VENDOR", "ATLAS_GPU_INDEX"):
         assert f"{key}=" in body, f"missing {key} in .env"
 
@@ -80,6 +81,7 @@ def test_yes_skip_download_writes_env_and_keys(tmp_path, monkeypatch, capsys):
     assert "ATLAS_MODELS_DIR=./models" in body
     assert "ATLAS_IMAGE_TAG=latest" in body
     assert "ATLAS_GHCR_OWNER=itigges22" in body
+    assert "ATLAS_MACOS_PREFIX=~/.atlas/macos" in body
 
 
 def test_api_keys_file_has_strict_permissions(tmp_path, monkeypatch):

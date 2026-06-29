@@ -176,7 +176,8 @@ def _read_nvidia_smi() -> List[GPUInfo]:
     if p.returncode != 0:
         return []
     gpus: List[GPUInfo] = []
-    for ln in (l.strip() for l in p.stdout.strip().splitlines() if l.strip()):
+    for ln in (line.strip() for line in p.stdout.strip().splitlines()
+               if line.strip()):
         parts = [x.strip() for x in ln.split(",")]
         if len(parts) < 3:
             continue
@@ -529,9 +530,9 @@ class TierProfile:
 
     Runtime fields map directly to docker-compose.yml / .env knobs:
       context_length   -> ATLAS_CTX_SIZE / CONTEXT_LENGTH
-      parallel_slots   -> PARALLEL_SLOTS  (llama-server --parallel)
-      kv_cache_k       -> KV_CACHE_TYPE_K (llama-server -ctk)
-      kv_cache_v       -> KV_CACHE_TYPE_V (llama-server -ctv)
+      parallel_slots   -> ATLAS_PARALLEL_SLOTS  (llama-server --parallel)
+      kv_cache_k       -> ATLAS_KV_TYPE_K (llama-server -ctk)
+      kv_cache_v       -> ATLAS_KV_TYPE_V (llama-server -ctv)
 
     The min_* fields are constraint floors used by `evaluate_constraints`.
     They reflect "what you actually need to run ATLAS at this tier without
@@ -568,14 +569,9 @@ class TierProfile:
         """
         return {
             "ATLAS_CTX_SIZE": str(self.context_length),
-            # Note: PARALLEL_SLOTS / KV_CACHE_TYPE_K|V are read by the
-            # llama entrypoint, not directly by docker-compose. Surface
-            # them so PC-054 wizard can render them, even though writing
-            # them into .env requires the entrypoint contract to honor
-            # `${PARALLEL_SLOTS:-...}`.
-            "PARALLEL_SLOTS": str(self.parallel_slots),
-            "KV_CACHE_TYPE_K": self.kv_cache_k,
-            "KV_CACHE_TYPE_V": self.kv_cache_v,
+            "ATLAS_PARALLEL_SLOTS": str(self.parallel_slots),
+            "ATLAS_KV_TYPE_K": self.kv_cache_k,
+            "ATLAS_KV_TYPE_V": self.kv_cache_v,
         }
 
 

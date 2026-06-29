@@ -2014,7 +2014,9 @@ _VERIFY_CMD_RE = re.compile(
     r"cargo\s+(run|test|check|build)|go\s+(run|test|build|vet)|"
     r"npm\s+(test|run|start)|yarn\s+(test|run|start)|pnpm\s+(test|run|start)|"
     r"make\b|just\b|curl\b|wget\b|http\b|httpie\b|"
-    r"mypy\b|ruff\b|pylint\b|tsc\b|eslint\b)"
+    r"mypy\b|ruff\b|pylint\b|tsc\b|eslint\b|"
+    r"markdownlint\b|stylelint\b|shellcheck\b|hadolint\b|flake8\b|"
+    r"rubocop\b|golangci-lint\b)"
 )
 
 

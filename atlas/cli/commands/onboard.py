@@ -32,7 +32,7 @@ import time
 import urllib.request
 from typing import Dict, List, Optional, Tuple
 
-from atlas.cli.commands import model_registry
+from atlas.cli import compose as compose_config
 
 
 # --- presentation (mirrors model.py / doctor.py) ---------------------------
@@ -222,8 +222,8 @@ def _arch_error_excerpt(logs: str) -> Optional[str]:
     low = logs.lower()
     if "unknown architecture" in low or "error loading model" in low:
         return "\n".join(
-            l for l in logs.splitlines()
-            if "architect" in l.lower() or "error loading" in l.lower()
+            line for line in logs.splitlines()
+            if "architect" in line.lower() or "error loading" in line.lower()
         )[:600]
     return None
 
@@ -240,15 +240,35 @@ def _arch_supported(atlas_root: str, env: Dict[str, str], model_file: str,
     if serving:
         return True, ""
 
+    backend = compose_config.resolve_backend(atlas_root, values=env)
+    if backend == "metal":
+        if healthy:
+            loaded = _loaded_model_name(url)
+            return False, (
+                "native Metal llama-server is healthy but serves {!r}, not "
+                "{!r}. Stop it and relaunch scripts/atlas-llama-macos.sh "
+                "after checking .env.".format(loaded or "an unknown model",
+                                                model_file)
+            )
+        return False, (
+            "native Metal llama-server is not reachable at {}. Start it in "
+            "another terminal with ./scripts/atlas-llama-macos.sh; onboarding "
+            "will not start the CUDA container on a Metal host.".format(url)
+        )
+
+    def compose_args(args: List[str]) -> List[str]:
+        return compose_config.command(atlas_root, args, values=env)
+
     if start:
         if healthy:
             _safe_print(f"  {DASH} llama-server is up but serving a different "
                         f"model — recreating to load this one…")
-            _run(["docker", "compose", "up", "-d", "--force-recreate",
-                  "llama-server", "--no-deps"], timeout=120, cwd=atlas_root)
+            _run(compose_args(["up", "-d", "--force-recreate",
+                               "llama-server", "--no-deps"]),
+                 timeout=120, cwd=atlas_root)
         else:
             _safe_print(f"  {DASH} starting llama-server (inference only)…")
-            _run(["docker", "compose", "up", "-d", "llama-server", "--no-deps"],
+            _run(compose_args(["up", "-d", "llama-server", "--no-deps"]),
                  timeout=120, cwd=atlas_root)
         # Poll for up to ~2.5 min while the model loads onto the GPU.
         for _ in range(30):
@@ -256,15 +276,17 @@ def _arch_supported(atlas_root: str, env: Dict[str, str], model_file: str,
             healthy, serving = _serving_this(url, model_file)
             if serving:
                 return True, ""
-            rc, logs, _ = _run(["docker", "compose", "logs", "--tail=200",
-                                 "llama-server"], timeout=20, cwd=atlas_root)
+            rc, logs, _ = _run(compose_args(
+                ["logs", "--tail=200", "llama-server"]),
+                timeout=20, cwd=atlas_root)
             excerpt = _arch_error_excerpt(logs)
             if excerpt:
                 return False, excerpt
 
     # Not serving this model and either not starting or timed out — inspect logs.
-    rc, logs, _ = _run(["docker", "compose", "logs", "--tail=200",
-                        "llama-server"], timeout=20, cwd=atlas_root)
+    rc, logs, _ = _run(compose_args(
+        ["logs", "--tail=200", "llama-server"]),
+        timeout=20, cwd=atlas_root)
     excerpt = _arch_error_excerpt(logs)
     if excerpt:
         return False, excerpt
@@ -277,7 +299,8 @@ def _arch_supported(atlas_root: str, env: Dict[str, str], model_file: str,
         "`docker compose logs -f llama-server`.)")
 
 
-def _print_rebuild_required(arch: Optional[str], excerpt: str, color: bool) -> None:
+def _print_rebuild_required(arch: Optional[str], excerpt: str, color: bool,
+                            atlas_root: str, env: Dict[str, str]) -> None:
     archname = f"'{arch}'" if arch else "this model's architecture"
     _safe_print()
     _safe_print(_c(f"{NO} REBUILD REQUIRED — your atlas-llama image can't load "
@@ -287,9 +310,12 @@ def _print_rebuild_required(arch: Optional[str], excerpt: str, color: bool) -> N
     _safe_print()
     _safe_print("  The bundled llama.cpp predates this architecture. You must "
                 "rebuild the inference image yourself:")
-    _safe_print(_c("    docker compose build llama-server   # ~70 min on CUDA",
-                   BOLD, color))
-    _safe_print(_c("    docker compose up -d llama-server --no-deps", BOLD, color))
+    build_cmd = compose_config.format_command(
+        atlas_root, ["build", "llama-server"], values=env)
+    start_cmd = compose_config.format_command(
+        atlas_root, ["up", "-d", "llama-server", "--no-deps"], values=env)
+    _safe_print(_c(f"    {build_cmd}", BOLD, color))
+    _safe_print(_c(f"    {start_cmd}", BOLD, color))
     _safe_print()
     _safe_print(_c(f"  {WARN} Do NOT strip ATLAS's custom llama.cpp patches.",
                    YELL, color))
@@ -348,8 +374,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Step 1 — optionally fetch an unregistered model first.
     if args.url:
-        _safe_print(f"[1/5] Fetching unregistered model via `atlas model install "
-                    f"--url`…")
+        _safe_print("[1/5] Fetching unregistered model via `atlas model install "
+                    "--url`…")
         from atlas.cli.commands import model as model_cmd
         inst_args = ["install", "--url", args.url]
         if args.file:
@@ -406,7 +432,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             # Compare like-for-like: fit at the slot count .env is sized for.
             try:
                 slots = int(os.environ.get("ATLAS_PARALLEL_SLOTS")
-                            or env.get("ATLAS_PARALLEL_SLOTS") or 4)
+                            or env.get("ATLAS_PARALLEL_SLOTS")
+                            or os.environ.get("PARALLEL_SLOTS")
+                            or env.get("PARALLEL_SLOTS") or 4)
             except ValueError:
                 slots = 4
             res = fit_mod.fit_runtime_knobs(meta, gpu.vram_gb,
@@ -433,16 +461,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         _safe_print(_c(f"  (runtime fit unavailable: {e})", DIM, color))
 
     # Step 2/3 — preflight + arch gate.
-    _safe_print(f"[2/5] Checking the inference engine can load it…")
+    _safe_print("[2/5] Checking the inference engine can load it…")
     loaded, excerpt = _arch_supported(atlas_root, env, model_file,
                                       start=not args.no_start, color=color)
     if not loaded:
-        _print_rebuild_required(arch, excerpt, color)
+        if compose_config.resolve_backend(atlas_root, values=env) == "metal":
+            _safe_print()
+            _safe_print(_c(f"{NO} Native Metal inference is not ready.",
+                           RED, color))
+            _safe_print(excerpt)
+            _safe_print("  Re-run `atlas onboard` after the native server is "
+                        "healthy.")
+        else:
+            _print_rebuild_required(arch, excerpt, color, atlas_root, env)
         return 2  # action required: operator must rebuild
     _safe_print(f"  {OK} llama-server is serving the model (arch supported).")
 
     # Step 4 — lens check.
-    _safe_print(f"[3/5] Geometric Lens dimension check…")
+    _safe_print("[3/5] Geometric Lens dimension check…")
     try:
         from atlas.cli.commands import lens as lens_cmd
         lens_cmd.main(["check"] + (["--no-color"] if args.no_color else []))
@@ -453,8 +489,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Step 5 — remaining operator-driven steps (concrete for THIS model).
     run_id = os.path.splitext(os.path.basename(model_file))[0] + "_lens"
-    _safe_print(f"[4/5] Remaining steps (operator-driven — candidate gen is hours "
-                f"on a large model):")
+    _safe_print("[4/5] Remaining steps (operator-driven — candidate gen is hours "
+                "on a large model):")
     _safe_print("  1) Generate this model's own candidates:")
     _safe_print(_c(f"     atlas bench --run-id {run_id} --tasks 200", BOLD, color))
     results_path = os.path.join(atlas_root, "benchmark", "results", run_id,
@@ -470,7 +506,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _safe_print("  Do not reuse another model's solutions — C(x) must learn THIS "
                 "model's geometry.")
 
-    _safe_print(f"[5/5] Baseline: run `atlas doctor` to confirm health "
+    _safe_print("[5/5] Baseline: run `atlas doctor` to confirm health "
                 "(lens dim-mismatch is expected until you retrain).")
     _safe_print()
     _safe_print(_c(f"{OK} Engine ready for {model_file}. Lens retrain is the "

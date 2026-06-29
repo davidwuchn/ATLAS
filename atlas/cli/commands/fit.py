@@ -32,7 +32,6 @@ import argparse
 import json
 import os
 import struct
-import sys
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional
 
@@ -305,7 +304,10 @@ def fit_runtime_knobs(meta: GGUFMeta, vram_gib: float,
             result = FitResult(
                 fits=True, ctx_total=ctx_total, per_slot=per_slot,
                 parallel=slots, kv_type_k=kv_type, kv_type_v=kv_type,
-                ubatch=ubatch, batch=max(2048, ubatch),
+                # llama.cpp self-embeddings require n_batch <= n_ubatch.
+                # ATLAS always enables embeddings, so advertise the value the
+                # runtime can actually use instead of relying on its clamp.
+                ubatch=ubatch, batch=ubatch,
                 vram_gib=round(vram_gib, 2), weights_gib=round(weights, 2),
                 kv_gib=round(kv_gib, 2), compute_gib=round(compute, 2),
                 reserve_gib=RESERVE_GIB, note=note)
@@ -354,7 +356,7 @@ def fit_runtime_knobs(meta: GGUFMeta, vram_gib: float,
                     "buffers exceed VRAM.")
     return FitResult(
         fits=False, ctx_total=0, per_slot=0, parallel=slots,
-        kv_type_k="q8_0", kv_type_v="q8_0", ubatch=512, batch=2048,
+        kv_type_k="q8_0", kv_type_v="q8_0", ubatch=512, batch=512,
         vram_gib=round(vram_gib, 2),
         weights_gib=round(meta.file_size * WEIGHTS_OVERHEAD / GIB, 2),
         kv_gib=round(min_kv, 2), compute_gib=round(compute, 2),

@@ -73,6 +73,8 @@ import os
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional
 
+from atlas.cli import compose as compose_config
+
 
 @dataclass(frozen=True)
 class Model:
@@ -553,7 +555,9 @@ def lens_artifact_dir_for(model: Model, atlas_root: str) -> Optional[str]:
             return model.lens_artifact_dir
         return os.path.normpath(os.path.join(atlas_root,
                                               model.lens_artifact_dir))
-    env = os.environ.get("ATLAS_LENS_MODELS")
+    env = (os.environ.get("ATLAS_LENS_MODELS")
+           or compose_config.read_env_file(atlas_root).get(
+               "ATLAS_LENS_MODELS"))
     if env:
         return env if os.path.isabs(env) else \
             os.path.normpath(os.path.join(atlas_root, env))
