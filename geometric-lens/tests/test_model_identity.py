@@ -40,7 +40,9 @@ def test_identity_rejects_same_dim_different_model():
 
 def test_identity_save_round_trip_is_atomic_shape(tmp_path):
     path = save_model_identity(str(tmp_path), "/models/Example.gguf", 3840)
-    assert json.loads(open(path).read()) == {
+    with open(path, encoding="utf-8") as identity_file:
+        saved = json.load(identity_file)
+    assert saved == {
         "model": "/models/Example.gguf",
         "embedding_dim": 3840,
     }

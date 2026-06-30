@@ -323,20 +323,44 @@ def _safe_overlay_path(name: str) -> Path:
 
 
 def _write_overlay_files(root: Path, files: Dict[str, str]):
-    root_resolved = root.resolve()
     for name, content in files.items():
         rel = _safe_overlay_path(name)
-        target = root / rel
         content = content if isinstance(content, str) else ""
         if len(content.encode("utf-8", "ignore")) > SHELL_SNAPSHOT_MAX_FILE_BYTES:
             raise HTTPException(status_code=413, detail=f"overlay file is too large: {name!r}")
+
+        # Walk directories relative to an already-open snapshot root. O_NOFOLLOW
+        # rejects symlink components and closes the resolve-then-write race that
+        # a plain Path.write_text() would leave between containment checking and
+        # the actual open.
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        parent_fd = os.dup(root_fd)
         try:
-            target_resolved = target.resolve(strict=False)
-            target_resolved.relative_to(root_resolved)
-        except (OSError, ValueError):
-            raise HTTPException(status_code=400, detail=f"overlay file escapes workspace: {name!r}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
+            for component in rel.parts[:-1]:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=parent_fd,
+                )
+                os.close(parent_fd)
+                parent_fd = next_fd
+
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+            file_fd = os.open(rel.name, flags, 0o600, dir_fd=parent_fd)
+            with os.fdopen(file_fd, "w", encoding="utf-8") as overlay_file:
+                overlay_file.write(content)
+        except OSError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsafe overlay file path: {name!r}",
+            ) from e
+        finally:
+            os.close(parent_fd)
+            os.close(root_fd)
 
 
 def _snapshot_workspace_with_overlay(files: Dict[str, str]) -> Path:
@@ -860,10 +884,11 @@ def _syntax_check_impl(lang: str, code: str, workspace: Path, filename: Optional
             errors.append(str(e))
 
     elif lang == "xml":
-        import xml.etree.ElementTree as ET
+        from defusedxml import ElementTree as ET
+        from defusedxml.common import DefusedXmlException
         try:
             ET.fromstring(code)
-        except ET.ParseError as e:
+        except (ET.ParseError, DefusedXmlException) as e:
             errors.append(str(e))
 
     else:

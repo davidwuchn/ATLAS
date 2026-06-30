@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,40 +22,92 @@ func resolveWorkspacePath(ctx *AgentContext, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
-	if !pathWithin(root, candidate) {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q is outside the workspace", path)
 	}
 
-	realRoot, err := filepath.EvalSymlinks(root)
+	workspace, err := os.OpenRoot(root)
 	if err != nil {
-		return "", fmt.Errorf("resolve workspace root symlinks: %w", err)
+		return "", fmt.Errorf("open workspace root: %w", err)
 	}
-	existing := candidate
+	defer workspace.Close()
+	existing := rel
 	for {
-		if _, statErr := os.Lstat(existing); statErr == nil {
+		if _, statErr := workspace.Stat(existing); statErr == nil {
 			break
 		} else if !os.IsNotExist(statErr) {
 			return "", fmt.Errorf("inspect path %q: %w", path, statErr)
 		}
 		parent := filepath.Dir(existing)
-		if parent == existing {
+		if parent == existing || existing == "." {
 			return "", fmt.Errorf("path %q has no existing workspace ancestor", path)
 		}
 		existing = parent
 	}
-	realExisting, err := filepath.EvalSymlinks(existing)
-	if err != nil {
-		return "", fmt.Errorf("resolve path symlinks: %w", err)
-	}
-	if !pathWithin(realRoot, realExisting) {
-		return "", fmt.Errorf("path %q escapes the workspace through a symlink", path)
-	}
 	return candidate, nil
 }
 
-func pathWithin(root, candidate string) bool {
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+// readWorkspaceFile opens a file through os.Root, so the read remains confined
+// even if a workspace symlink is swapped between validation and use.
+func readWorkspaceFile(ctx *AgentContext, path string) ([]byte, string, error) {
+	resolved, err := resolveWorkspacePath(ctx, path)
+	if err != nil {
+		return nil, "", err
+	}
+	rootPath, err := filepath.Abs(ctx.WorkingDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+	rel, err := filepath.Rel(rootPath, resolved)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve workspace-relative path: %w", err)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("open workspace root: %w", err)
+	}
+	defer root.Close()
+	file, err := root.Open(rel)
+	if err != nil {
+		return nil, "", err
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, "", readErr
+	}
+	if closeErr != nil {
+		return nil, "", closeErr
+	}
+	return data, resolved, nil
+}
+
+// readWorkspaceDir is the directory equivalent of readWorkspaceFile.
+func readWorkspaceDir(ctx *AgentContext, path string) ([]os.DirEntry, error) {
+	resolved, err := resolveWorkspacePath(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	rootPath, err := filepath.Abs(ctx.WorkingDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace root: %w", err)
+	}
+	rel, err := filepath.Rel(rootPath, resolved)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace-relative path: %w", err)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("open workspace root: %w", err)
+	}
+	defer root.Close()
+	dir, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	return dir.ReadDir(-1)
 }
 
 // validateToolWorkspacePaths applies workspace containment before any tool

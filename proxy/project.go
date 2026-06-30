@@ -58,7 +58,6 @@ func detectNodeJS(projectDir string, files map[string]bool) *ProjectInfo {
 		return nil
 	}
 
-	pm := detectNodePackageManager(files, "")
 	info := &ProjectInfo{
 		Language:    "nodejs",
 		ConfigFiles: []string{"package.json"},
@@ -79,7 +78,7 @@ func detectNodeJS(projectDir string, files map[string]bool) *ProjectInfo {
 	if err := json.Unmarshal(data, &pkg); err != nil {
 		return info
 	}
-	pm = detectNodePackageManager(files, pkg.PackageManager)
+	pm := detectNodePackageManager(files, pkg.PackageManager)
 
 	if hasScript(pkg.Scripts, "build") {
 		info.BuildCommand = nodeScriptCommand(pm, "build")

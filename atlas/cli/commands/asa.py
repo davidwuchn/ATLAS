@@ -601,6 +601,8 @@ def _emit_build(args: argparse.Namespace, color: bool) -> int:
             try:
                 os.remove(out_path)
             except OSError:
+                # Best-effort cleanup after refusing an unmarked vector; the
+                # command is already returning failure to the operator.
                 pass
             return 1
         with open(out_path + ".model", "w") as marker:
@@ -728,6 +730,8 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
             if mp:
                 model_label = os.path.splitext(os.path.basename(mp))[0]
         except Exception:
+            # Configured-model discovery is best-effort; the explicit-model
+            # validation below produces the actionable error for the user.
             pass
     if not model_label:
         _safe_print(f"  {RED if color else ''}Could not identify the model "

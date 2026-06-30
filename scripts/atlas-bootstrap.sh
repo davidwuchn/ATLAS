@@ -116,10 +116,68 @@ if [[ "$(id -u)" == "0" ]]; then
         TARGET_GID=0
     fi
 else
-    TARGET_USER="$USER"
+    TARGET_USER="$(id -un)"
     TARGET_UID=$(id -u)
     TARGET_GID=$(id -g)
 fi
+
+target_home_dir() {
+    if [[ "$TARGET_USER" == "root" ]]; then
+        printf '%s\n' "/root"
+        return
+    fi
+
+    local home
+    home=$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6 || true)
+    if [[ -n "$home" ]]; then
+        printf '%s\n' "$home"
+    elif [[ "$TARGET_USER" == "$(id -un)" ]]; then
+        printf '%s\n' "$HOME"
+    else
+        printf '%s\n' "/home/$TARGET_USER"
+    fi
+}
+
+# Run ownership-sensitive work as the human who will use ATLAS. When this
+# script was launched with `sudo bash`, SUDO is intentionally empty because
+# root does not need elevation; that does not mean `-u user` can be invoked on
+# its own. Keep de-escalation separate from the elevation wrapper.
+run_as_target() {
+    if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
+        if command -v sudo &>/dev/null; then
+            sudo -H -u "$TARGET_USER" -- "$@"
+        elif command -v runuser &>/dev/null; then
+            runuser -u "$TARGET_USER" -- "$@"
+        else
+            log_err "Cannot run as $TARGET_USER: neither sudo nor runuser is available."
+            return 1
+        fi
+    else
+        "$@"
+    fi
+}
+
+ensure_target_profile_path() {
+    local marker="$1"
+    local export_line="$2"
+    local target_home
+    target_home=$(target_home_dir)
+
+    # .profile covers login shells and is created when absent. Also update an
+    # existing .bashrc for interactive shells, without duplicating entries on
+    # repeat installs.
+    local profile
+    for profile in "$target_home/.profile" "$target_home/.bashrc"; do
+        if [[ "$profile" == *.bashrc && ! -e "$profile" ]]; then
+            continue
+        fi
+        if ! grep -Fq "$marker" "$profile" 2>/dev/null; then
+            printf '%s\n' "$export_line" | run_as_target tee -a "$profile" >/dev/null \
+                || return 1
+            log_info "Added $marker to PATH in $profile"
+        fi
+    done
+}
 
 # ---------------------------------------------------------------------------
 # Docker invocation prefix
@@ -558,7 +616,7 @@ install_rocm_setup() {
 
     # 3. Add docker-running user to render + video so containers can
     # read /dev/kfd and /dev/dri/* via group_add in docker-compose.rocm.yml.
-    local target_user="${SUDO_USER:-$USER}"
+    local target_user="$TARGET_USER"
     if [[ "$target_user" != "root" ]]; then
         local missing_groups=""
         for grp in render video; do
@@ -730,7 +788,7 @@ ensure_repo_and_env() {
             if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
                 # Run the clone as the target user when bootstrapping via
                 # sudo, so .git/config, hooks, etc. get the right ownership.
-                $SUDO -u "$TARGET_USER" git clone "$repo_url" "$install_dir" \
+                run_as_target git clone "$repo_url" "$install_dir" \
                     || die "git clone failed"
             else
                 git clone "$repo_url" "$install_dir" || die "git clone failed"
@@ -787,9 +845,9 @@ ensure_repo_and_env() {
         log_ok "Created .env from .env.example (edit ATLAS_MODELS_DIR if needed)"
     fi
 
-    install_atlas_cli
-    install_go
-    build_atlas_tui
+    install_atlas_cli || die "ATLAS CLI installation failed."
+    install_go || die "Go installation failed; atlas-tui cannot be built."
+    build_atlas_tui || die "atlas-tui build failed."
 }
 
 install_atlas_cli() {
@@ -800,7 +858,7 @@ install_atlas_cli() {
     if ! command -v python3 &>/dev/null; then
         log_warn "python3 not found — skipping CLI install. \`atlas\` command will be unavailable."
         log_warn "  Install Python 3.9+ then run: pip install --user -e ."
-        return
+        return 1
     fi
 
     # pip is sometimes a separate package on RHEL minimal installs.
@@ -813,14 +871,8 @@ install_atlas_cli() {
         if ! python3 -m pip --version &>/dev/null; then
             log_warn "couldn't install pip — skipping CLI install."
             log_warn "  Install pip then run: pip install --user -e ."
-            return
+            return 1
         fi
-    fi
-
-    # Run pip as the target user so it lands in their ~/.local/bin, not root's.
-    local runner=""
-    if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
-        runner="$SUDO -u $TARGET_USER -H"
     fi
 
     # Editable install needs PEP 660 support, which requires setuptools >= 64
@@ -833,18 +885,18 @@ install_atlas_cli() {
     # environment") on Debian 12 / Ubuntu 23.04+ / Fedora 38+. Older pip
     # ignores it as an unknown env var, so it's safe to always set.
     log_info "Upgrading pip + setuptools (PEP 660 editable install support)…"
-    PIP_BREAK_SYSTEM_PACKAGES=1 $runner python3 -m pip install --user --upgrade --quiet \
+    run_as_target env PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user --upgrade --quiet \
         pip setuptools wheel >>/tmp/atlas-pip.log 2>&1 \
         || log_warn "pip self-upgrade failed; continuing with system pip."
 
     log_info "Installing ATLAS Python CLI (pip install --user -e .)…"
-    if PIP_BREAK_SYSTEM_PACKAGES=1 $runner python3 -m pip install --user -e . --quiet 2>&1 | tee -a /tmp/atlas-pip.log; then
+    if run_as_target env PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user -e . --quiet 2>&1 | tee -a /tmp/atlas-pip.log; then
         log_ok "ATLAS CLI installed"
     else
         log_warn "pip install failed (exit ${PIPESTATUS[0]}). Last 20 lines: /tmp/atlas-pip.log"
         tail -20 /tmp/atlas-pip.log >&2 || true
         log_warn "  Recovery: cd $ATLAS_INSTALL_DIR && pip install --user -e ."
-        return
+        return 1
     fi
 
     # Ensure ~/.local/bin is on PATH for future shells. pip puts the
@@ -852,27 +904,18 @@ install_atlas_cli() {
     # "command not found" until the user manually adds it. Append to the
     # target user's .bashrc only if it's not already present.
     local target_home
-    if [[ "$TARGET_USER" == "root" ]]; then
-        target_home="/root"
-    else
-        target_home=$(getent passwd "$TARGET_USER" | cut -d: -f6 2>/dev/null)
-        [[ -z "$target_home" ]] && target_home="$HOME"
-    fi
-    local bashrc="$target_home/.bashrc"
-    if [[ -f "$bashrc" ]] && ! grep -q '\.local/bin' "$bashrc" 2>/dev/null; then
-        if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
-            $SUDO -u "$TARGET_USER" sh -c "echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> $bashrc"
-        else
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$bashrc"
-        fi
-        log_info "Added ~/.local/bin to PATH in $bashrc"
-        log_warn "  Run \`source ~/.bashrc\` or open a new shell for \`atlas\` to be on PATH."
-    fi
+    target_home=$(target_home_dir)
+    ensure_target_profile_path '.local/bin' 'export PATH="$HOME/.local/bin:$PATH"' \
+        || { log_warn "could not persist ~/.local/bin on PATH"; return 1; }
 
     # Quick check: can we resolve `atlas` for the target user?
     if [[ -x "$target_home/.local/bin/atlas" ]]; then
         log_ok "atlas binary at: $target_home/.local/bin/atlas"
+    else
+        log_warn "pip reported success but $target_home/.local/bin/atlas is missing."
+        return 1
     fi
+    return 0
 }
 
 install_go() {
@@ -884,16 +927,27 @@ install_go() {
     local need_version="1.24"
     local install_version="${ATLAS_GO_VERSION:-1.24.0}"
 
-    # Already have new-enough Go?
-    if command -v go &>/dev/null; then
+    # Already have new-enough Go? A previous bootstrap may have installed it
+    # under /usr/local/go while this non-login process still lacks that PATH.
+    local go_cmd=""
+    go_cmd=$(command -v go 2>/dev/null || true)
+    if [[ -z "$go_cmd" && -x /usr/local/go/bin/go ]]; then
+        go_cmd="/usr/local/go/bin/go"
+    fi
+    if [[ -n "$go_cmd" ]]; then
         local cur
-        cur=$(go version 2>/dev/null | awk '{print $3}' | sed 's/^go//')
+        cur=$("$go_cmd" version 2>/dev/null | awk '{print $3}' | sed 's/^go//')
         if [[ -n "$cur" ]]; then
             # Compare major.minor only — patch is irrelevant for capability.
             local cur_mm need_mm
             cur_mm=$(echo "$cur" | awk -F. '{printf "%d.%d", $1, $2}')
             need_mm=$(echo "$need_version" | awk -F. '{printf "%d.%d", $1, $2}')
             if [[ "$(printf '%s\n%s\n' "$need_mm" "$cur_mm" | sort -V | head -1)" == "$need_mm" ]]; then
+                if [[ "$go_cmd" == /usr/local/go/bin/go ]]; then
+                    export PATH="/usr/local/go/bin:$PATH"
+                    ensure_target_profile_path '/usr/local/go/bin' 'export PATH="/usr/local/go/bin:$PATH"' \
+                        || { log_warn "could not persist /usr/local/go/bin on PATH"; return 1; }
+                fi
                 log_ok "Go $cur already installed (need $need_version+)"
                 return 0
             fi
@@ -928,22 +982,8 @@ install_go() {
     export PATH="/usr/local/go/bin:$PATH"
 
     # Persist for the target user's future shells. Skip if already added.
-    local target_home
-    if [[ "$TARGET_USER" == "root" ]]; then
-        target_home="/root"
-    else
-        target_home=$(getent passwd "$TARGET_USER" | cut -d: -f6 2>/dev/null)
-        [[ -z "$target_home" ]] && target_home="$HOME"
-    fi
-    local bashrc="$target_home/.bashrc"
-    if [[ -f "$bashrc" ]] && ! grep -q '/usr/local/go/bin' "$bashrc" 2>/dev/null; then
-        if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
-            $SUDO -u "$TARGET_USER" sh -c "echo 'export PATH=\"/usr/local/go/bin:\$PATH\"' >> $bashrc"
-        else
-            echo 'export PATH="/usr/local/go/bin:$PATH"' >> "$bashrc"
-        fi
-        log_info "Added /usr/local/go/bin to PATH in $bashrc"
-    fi
+    ensure_target_profile_path '/usr/local/go/bin' 'export PATH="/usr/local/go/bin:$PATH"' \
+        || { log_warn "could not persist /usr/local/go/bin on PATH"; return 1; }
 
     log_ok "Go installed: $(/usr/local/go/bin/go version | awk '{print $3}')"
     return 0
@@ -958,44 +998,35 @@ build_atlas_tui() {
     if ! command -v go &>/dev/null && [[ ! -x /usr/local/go/bin/go ]]; then
         log_warn "Go not available — skipping atlas-tui build."
         log_warn "  Recovery: cd $ATLAS_INSTALL_DIR/tui && go build -o ~/.local/bin/atlas-tui ."
-        return
+        return 1
     fi
 
     local target_home
-    if [[ "$TARGET_USER" == "root" ]]; then
-        target_home="/root"
-    else
-        target_home=$(getent passwd "$TARGET_USER" | cut -d: -f6 2>/dev/null)
-        [[ -z "$target_home" ]] && target_home="$HOME"
-    fi
+    target_home=$(target_home_dir)
     local bin_dir="$target_home/.local/bin"
     local out="$bin_dir/atlas-tui"
 
     log_info "Building atlas-tui (~30s, downloads Go modules first time)…"
 
     # Ensure the bin dir exists and is owned by the target user.
-    $SUDO -u "$TARGET_USER" mkdir -p "$bin_dir" 2>/dev/null \
-        || mkdir -p "$bin_dir" 2>/dev/null
-
-    local runner=""
-    if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
-        runner="$SUDO -u $TARGET_USER -H"
-    fi
+    run_as_target mkdir -p "$bin_dir" 2>/dev/null || return 1
 
     # GOTOOLCHAIN=auto (Go 1.21+ default) handles the tui's go.mod
     # requirement of Go 1.26+ — auto-downloads the newer toolchain even
     # if the installed go is 1.24. PATH includes /usr/local/go/bin from
     # install_go() above.
     set +e
-    $runner sh -c "cd '$ATLAS_INSTALL_DIR/tui' && PATH='/usr/local/go/bin:\$PATH' go build -o '$out' ." 2>&1 | tee /tmp/atlas-tui-build.log
+    run_as_target sh -c "cd '$ATLAS_INSTALL_DIR/tui' && PATH='/usr/local/go/bin:\$PATH' go build -o '$out' ." 2>&1 | tee /tmp/atlas-tui-build.log
     local rc=${PIPESTATUS[0]}
     set -e
 
     if [[ $rc -eq 0 && -x "$out" ]]; then
         log_ok "atlas-tui built: $out"
+        return 0
     else
         log_warn "atlas-tui build failed (exit $rc). Log: /tmp/atlas-tui-build.log"
         log_warn "  Recovery: cd $ATLAS_INSTALL_DIR/tui && go build -o $out ."
+        return 1
     fi
 }
 
@@ -1019,15 +1050,11 @@ download_models() {
     log_info "Progress is shown live below; full output also saved to /tmp/atlas-models.log."
     echo
     # Run as the target user so files end up owned by the human, not root.
-    local runner=""
-    if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
-        runner="$SUDO -u $TARGET_USER"
-    fi
     # Stream output live (no grep filter — that hid curl's progress bar
     # and any error messages that didn't match the [INFO]/[WARN]/[ERROR]
     # pattern). `tee` preserves the log without breaking line buffering.
     set +e
-    $runner ./scripts/download-models.sh 2>&1 | tee /tmp/atlas-models.log
+    run_as_target ./scripts/download-models.sh 2>&1 | tee /tmp/atlas-models.log
     local rc=${PIPESTATUS[0]}
     set -e
     echo
@@ -1042,7 +1069,7 @@ download_models() {
     # --lens path. Without compatible artifacts, scoring degrades safely.
     log_info "Fetching model-compatible Lens/ASA artifacts…"
     set +e
-    $runner ./scripts/download-models.sh --lens 2>&1 | tee -a /tmp/atlas-models.log
+    run_as_target ./scripts/download-models.sh --lens 2>&1 | tee -a /tmp/atlas-models.log
     rc=${PIPESTATUS[0]}
     set -e
     if [[ $rc -eq 0 ]]; then
@@ -1240,16 +1267,11 @@ build_asa_steering_vector() {
     local image_tag="${ATLAS_IMAGE_TAG:-latest}"
     local ghcr_owner="${ATLAS_GHCR_OWNER:-itigges22}"
     local image="ghcr.io/${ghcr_owner}/atlas-llama:${image_tag}"
-    local runner=""
-    if [[ "$(id -u)" == "0" && "$TARGET_USER" != "root" ]]; then
-        runner="$SUDO -u $TARGET_USER"
-    fi
-
     # 1. Generate the ignored contrast-pair corpus on demand, then render it
     # with the loaded model's own chat template.
     if [[ ! -s "$asa_dir/contrast_pairs.jsonl" ]]; then
         log_info "Generating model-neutral ASA contrast pairs…"
-        if ! $runner python3 "$asa_dir/generate_pairs.py" \
+        if ! run_as_target python3 "$asa_dir/generate_pairs.py" \
              --out "$asa_dir/contrast_pairs.jsonl" --n 1000 --seed 42 \
              >> /tmp/atlas-asa-build.log 2>&1; then
             log_warn "ASA contrast-pair generation failed — steering remains disabled"
@@ -1258,7 +1280,7 @@ build_asa_steering_vector() {
     fi
     log_info "Generating ASA prompt files from $asa_dir/contrast_pairs.jsonl…"
     set +e
-    $runner python3 "$asa_dir/build_cvector_prompts.py" \
+    run_as_target python3 "$asa_dir/build_cvector_prompts.py" \
         --pairs "$asa_dir/contrast_pairs.jsonl" \
         --positive "$models_dir/_asa_positive.txt" \
         --negative "$models_dir/_asa_negative.txt" \

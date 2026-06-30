@@ -56,4 +56,6 @@ def test_derive_rejects_nonseparating_energy_distributions():
 def test_save_round_trips_calibration(tmp_path):
     expected = derive_cx_normalization(3.0, 13.0)
     path = save_cx_normalization(str(tmp_path), expected)
-    assert json.loads(open(path).read()) == expected
+    with open(path, encoding="utf-8") as calibration_file:
+        saved = json.load(calibration_file)
+    assert saved == expected

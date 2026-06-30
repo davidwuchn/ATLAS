@@ -11,12 +11,11 @@ handling.
 """
 
 import json
-import math
 import re
 import time
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 try:
     import httpx

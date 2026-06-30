@@ -39,6 +39,8 @@ def read_env_file(atlas_root: str) -> Dict[str, str]:
                     value = head
                 values[key.strip()] = value.strip().strip("'\"")
     except OSError:
+        # An unreadable optional .env is treated as absent; callers still
+        # honor explicit process-environment values and built-in defaults.
         pass
     return values
 

@@ -106,6 +106,8 @@ def _read_env_file(atlas_root: str) -> Dict[str, str]:
                     v = head
                 out[k.strip()] = v.strip().strip('"').strip("'")
     except OSError:
+        # An unreadable optional .env is treated as empty so explicit command
+        # arguments and process-environment values can still drive onboarding.
         pass
     return out
 
@@ -483,6 +485,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         from atlas.cli.commands import lens as lens_cmd
         lens_cmd.main(["check"] + (["--no-color"] if args.no_color else []))
     except SystemExit:
+        # lens check is invoked as a nested CLI and reports its own verdict;
+        # onboarding continues to print the remaining operator steps.
         pass
     except Exception as e:
         _safe_print(_c(f"  (lens check unavailable: {e})", DIM, color))

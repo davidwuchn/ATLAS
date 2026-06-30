@@ -475,6 +475,7 @@ def _detect_total_ram_gib() -> float:
                 if line.startswith("MemTotal:"):
                     return int(line.split()[1]) / (1024 ** 2)  # kB → GiB
     except OSError:
+        # /proc is Linux-specific; continue to macOS and psutil probes.
         pass
     # macOS / BSD.
     try:
@@ -484,6 +485,8 @@ def _detect_total_ram_gib() -> float:
         if out.returncode == 0 and out.stdout.strip():
             return int(out.stdout.strip()) / (1024 ** 3)
     except Exception:
+        # sysctl is a best-effort platform probe; psutil remains available as
+        # the portable fallback.
         pass
     # Portable fallback if psutil happens to be installed.
     try:

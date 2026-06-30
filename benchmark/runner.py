@@ -5,14 +5,11 @@ Handles sending prompts to the LLM, extracting code from responses,
 and executing code in isolated sandboxes with resource limits.
 """
 
-import json
 import os
 import re
 import subprocess
 import tempfile
 import time
-import urllib.request
-import urllib.error
 from typing import Tuple, List
 
 # Try httpx first, fall back to urllib
@@ -427,6 +424,8 @@ class BenchmarkRunner:
                         elif isinstance(e, _hx.RequestError):
                             last_error = f"Request error: {e}"
                     except Exception:
+                        # Error classification is diagnostic-only; preserve
+                        # the original exception text captured above.
                         pass
             if attempt < self.max_retries - 1:
                 time.sleep(self.retry_delay * (attempt + 1))

@@ -35,6 +35,46 @@ def test_xml_syntax_check_rejects_invalid_document(tmp_path):
     assert errors
 
 
+def test_xml_syntax_check_rejects_entity_expansion(tmp_path):
+    sandbox = _load_sandbox_module()
+    document = """<!DOCTYPE bomb [
+      <!ENTITY a "1234567890">
+      <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+    ]><root>&b;</root>"""
+
+    errors = sandbox._syntax_check_impl("xml", document, tmp_path)
+
+    assert errors
+
+
+def test_overlay_write_rejects_symlink_leaf(tmp_path):
+    sandbox = _load_sandbox_module()
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("do not overwrite")
+    (root / "candidate.py").symlink_to(outside)
+
+    with pytest.raises(HTTPException):
+        sandbox._write_overlay_files(root, {"candidate.py": "attacker content"})
+
+    assert outside.read_text() == "do not overwrite"
+
+
+def test_overlay_write_rejects_symlink_parent(tmp_path):
+    sandbox = _load_sandbox_module()
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "src").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(HTTPException):
+        sandbox._write_overlay_files(root, {"src/candidate.py": "attacker content"})
+
+    assert not (outside / "candidate.py").exists()
+
+
 def test_shell_overlay_runs_without_mutating_workspace(tmp_path):
     sandbox = _load_sandbox_module()
     workspace = tmp_path / "workspace"

@@ -36,6 +36,8 @@ def get_loaded_model_name() -> str:
         if models and models[0].get("id"):
             return str(models[0]["id"])
     except Exception:
+        # Provenance lookup is best-effort; offline training can still use
+        # the explicitly configured ATLAS_MODEL_NAME fallback below.
         pass
     return os.environ.get("ATLAS_MODEL_NAME", "unknown-local-model")
 

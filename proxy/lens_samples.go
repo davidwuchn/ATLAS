@@ -74,7 +74,7 @@ func sanitizeModelName(name string) string {
 }
 
 // appendLensSample appends one sample to the model's JSONL corpus.
-func appendLensSample(model string, s LensSample) error {
+func appendLensSample(model string, s LensSample) (returnErr error) {
 	if s.Timestamp == "" {
 		s.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -93,7 +93,11 @@ func appendLensSample(model string, s LensSample) error {
 	if err != nil {
 		return fmt.Errorf("lens-samples: open: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && returnErr == nil {
+			returnErr = fmt.Errorf("lens-samples: close: %w", closeErr)
+		}
+	}()
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		return fmt.Errorf("lens-samples: write: %w", err)
 	}

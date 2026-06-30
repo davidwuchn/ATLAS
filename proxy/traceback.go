@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -61,7 +60,7 @@ func missingModuleSteer(ctx *AgentContext, output string) string {
 	// Prefer the project's own dependency manifest when one is present — it
 	// pins the right versions and installs everything in one shot.
 	hasReqs := false
-	if entries, err := os.ReadDir(resolveAgentPath(ctx, ".")); err == nil {
+	if entries, err := readWorkspaceDir(ctx, "."); err == nil {
 		for _, e := range entries {
 			switch strings.ToLower(e.Name()) {
 			case "requirements.txt", "pyproject.toml", "pipfile":
@@ -108,7 +107,7 @@ func missingFileSteer(ctx *AgentContext, output string) string {
 		seen[cand] = true
 		base := filepath.Base(cand)
 		dir := filepath.Dir(cand) // "." when cand is a bare filename
-		entries, err := os.ReadDir(resolveAgentPath(ctx, dir))
+		entries, err := readWorkspaceDir(ctx, dir)
 		if err != nil {
 			continue
 		}
@@ -255,8 +254,7 @@ func tracebackSteer(ctx *AgentContext, output string) string {
 	// loops, and gets stopped (the 2/3 variance). The harness HAS read the file
 	// to build this steer, so the edit is grounded, not blind.
 	exact := ""
-	resolved := resolveAgentPath(ctx, file)
-	if data, err := os.ReadFile(resolved); err == nil {
+	if data, resolved, err := readWorkspaceFile(ctx, file); err == nil {
 		lines := strings.Split(string(data), "\n")
 		if lineNo >= 1 && lineNo <= len(lines) {
 			exact = strings.TrimSpace(lines[lineNo-1])

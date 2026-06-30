@@ -51,6 +51,8 @@ def _emit_publish_all(args: argparse.Namespace, color: bool) -> int:
             if mp:
                 model_label = os.path.splitext(os.path.basename(mp))[0]
         except Exception:
+            # Model autodetection is optional here; the explicit validation
+            # below tells the publisher to pass a model when it fails.
             pass
     if not model_label:
         _safe_print(f"  {RED if color else ''}No model resolved — pass one "
@@ -145,6 +147,7 @@ def _emit_publish_all(args: argparse.Namespace, color: bool) -> int:
         from atlas.cli.commands.tier import classify, probe
         entry_tier = classify(probe()).tier
     except Exception:
+        # Tier is advisory registry metadata; medium is the safe fallback.
         pass
     model_file = model_label + ".gguf"
     size_gb = 0.0
@@ -156,6 +159,8 @@ def _emit_publish_all(args: argparse.Namespace, color: bool) -> int:
         size_gb = round(os.path.getsize(
             os.path.join(base, model_file)) / (1024 ** 3), 1)
     except Exception:
+        # Size is optional publishing metadata; artifact validation and hashes
+        # remain mandatory regardless of this lookup.
         pass
 
     entry = _render_registry_entry(model_label, model_file, size_gb,

@@ -46,6 +46,8 @@ def _default_llama_url() -> str:
                         if port:
                             return f"http://localhost:{port}"
     except Exception:
+        # The compose .env is optional for this standalone helper; retain the
+        # historical localhost fallback when it cannot be read.
         pass
     return "http://localhost:32735"
 

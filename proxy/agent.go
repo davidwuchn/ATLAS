@@ -897,7 +897,8 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 			// logs atlas-proxy` without having to attach a debugger.
 			// PC-039 follow-up.
 			if !result.Success {
-				log.Printf("[agent] turn=%d tool=%s FAIL: %s", turn, parsed.Name, truncateStr(result.Error, 240))
+				log.Printf("[agent] turn=%d tool=%s FAIL: %s", turn,
+					safeLogField(parsed.Name, 64), safeLogField(result.Error, 240))
 			}
 
 			ctx.Stream("tool_result", map[string]interface{}{

@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -165,3 +167,30 @@ def test_build_verification_rejects_target_outside_workspace():
     assert "under working_dir" in err
     assert evidence["status"] == "unavailable"
     assert sandbox.calls == []
+
+
+@pytest.mark.parametrize(
+    ("file_path", "working_dir", "expected"),
+    [
+        ("/workspace/src/app.py", "/workspace", "src/app.py"),
+        ("src/app.py", "/workspace", "src/app.py"),
+        ("/workspace/app.py", "/workspace", "app.py"),
+    ],
+)
+def test_project_relative_path_accepts_only_project_paths(file_path, working_dir, expected):
+    assert v3main._project_relative_path(file_path, working_dir) == expected
+
+
+@pytest.mark.parametrize(
+    ("file_path", "working_dir"),
+    [
+        ("/tmp/app.py", "/workspace"),
+        ("../app.py", "/workspace"),
+        ("src/../../app.py", "/workspace"),
+        ("/workspace/app.py", "workspace"),
+        ("", "/workspace"),
+    ],
+)
+def test_project_relative_path_rejects_escape_and_invalid_roots(file_path, working_dir):
+    with pytest.raises(ValueError):
+        v3main._project_relative_path(file_path, working_dir)

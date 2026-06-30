@@ -31,7 +31,6 @@ Telemetry: results/<run_id>/telemetry/v3_events.jsonl
 """
 
 import json
-import math
 import os
 import re
 import shutil

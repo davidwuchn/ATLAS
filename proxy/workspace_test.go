@@ -43,6 +43,38 @@ func TestResolveWorkspacePathRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestReadWorkspaceFileRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	ctx := &AgentContext{WorkingDir: root}
+	if _, _, err := readWorkspaceFile(ctx, "escape/secret.txt"); err == nil {
+		t.Fatal("readWorkspaceFile followed a symlink outside the workspace")
+	}
+}
+
+func TestReadWorkspaceFileReadsRegularWorkspaceFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "inside.txt"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := readWorkspaceFile(&AgentContext{WorkingDir: root}, "inside.txt")
+	if err != nil {
+		t.Fatalf("readWorkspaceFile: %v", err)
+	}
+	if string(got) != "inside" {
+		t.Fatalf("readWorkspaceFile = %q, want inside", got)
+	}
+}
+
 func TestExecuteToolCallRejectsWorkspaceEscape(t *testing.T) {
 	root := t.TempDir()
 	ctx := &AgentContext{WorkingDir: root}

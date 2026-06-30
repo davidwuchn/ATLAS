@@ -467,8 +467,7 @@ async def sync_project(
             f"{bm25_index.num_docs} BM25 docs"
         )
     except Exception as e:
-        logger.error(f"Failed to build PageIndex: {e}")
-        raise HTTPException(status_code=500, detail=f"PageIndex build failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=_safe_detail(e, "PageIndex build"))
 
     # Save project metadata
     project_store.create_project(
@@ -917,8 +916,7 @@ async def router_stats():
             "aggregate_stats": stats,
         }
     except Exception as e:
-        logger.error(f"Failed to get router stats: {e}")
-        return {"enabled": True, "error": str(e)}
+        return {"enabled": True, "error": _safe_detail(e, "router stats")}
 
 
 @app.post("/internal/router/reset")
@@ -940,8 +938,7 @@ async def router_reset():
 
         return {"status": "reset", "message": "Thompson state and stats reset to uniform priors"}
     except Exception as e:
-        logger.error(f"Failed to reset router: {e}")
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": _safe_detail(e, "router reset")}
 
 
 @app.post("/internal/router/feedback")
@@ -955,7 +952,7 @@ async def router_feedback(
         record_route_feedback(route, difficulty_bin, success)
         return {"status": "recorded"}
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": _safe_detail(e, "router feedback")}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -969,7 +966,11 @@ async def lens_stats():
         from geometric_lens.service import get_model_info
         return get_model_info()
     except Exception as e:
-        return {"loaded": False, "enabled": False, "error": str(e)}
+        return {
+            "loaded": False,
+            "enabled": False,
+            "error": _safe_detail(e, "lens stats"),
+        }
 
 
 @app.api_route("/internal/lens/evaluate", methods=["GET", "POST"])
@@ -996,7 +997,7 @@ async def lens_evaluate(request: Request, query: str = None):
             "energy_normalized": normalized,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": _safe_detail(e, "lens evaluate")}
 
 
 class LensScoreTextRequest(BaseModel):
@@ -1041,8 +1042,11 @@ async def lens_score_text(request: LensScoreTextRequest):
             "enabled": True,
         }
     except Exception as e:
-        logger.error(f"Lens score-text failed: {e}")
-        return {"energy": 0.0, "normalized": 0.5, "error": str(e)}
+        return {
+            "energy": 0.0,
+            "normalized": 0.5,
+            "error": _safe_detail(e, "lens score-text"),
+        }
 
 
 class LensRetrainRequest(BaseModel):
@@ -1126,8 +1130,7 @@ async def lens_retrain(request: LensRetrainRequest):
 
         return {"status": "ok", "metrics": metrics}
     except Exception as e:
-        logger.error(f"Lens retrain failed: {e}")
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": _safe_detail(e, "lens retrain")}
 
 
 @app.post("/internal/lens/reload")
@@ -1138,8 +1141,7 @@ async def lens_reload():
         result = reload_weights()
         return {"status": result.get("status", "unknown"), **result}
     except Exception as e:
-        logger.error(f"Lens reload failed: {e}")
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": _safe_detail(e, "lens reload")}
 
 
 @app.post("/internal/lens/gx-score")
@@ -1162,12 +1164,11 @@ async def lens_gx_score(request: LensScoreTextRequest):
 
         return evaluate_combined(request.text)
     except Exception as e:
-        logger.error(f"Lens gx-score failed: {e}")
         return {
             "cx_energy": 0.0, "cx_normalized": 0.5,
             "cx_calibrated": False,
             "gx_score": 0.5, "verdict": "error",
-            "error": str(e),
+            "error": _safe_detail(e, "lens gx-score"),
         }
 
 
@@ -1212,11 +1213,10 @@ async def lens_score_per_step(request: LensScorePerStepRequest):
         )
         return result
     except Exception as e:
-        logger.error(f"Lens score-per-step failed: {e}")
         return {
             "enabled": True, "gx_available": False,
             "per_step": [], "aggregate": {}, "n_tokens": 0,
-            "error": str(e),
+            "error": _safe_detail(e, "lens score-per-step"),
         }
 
 
@@ -1245,9 +1245,12 @@ async def lens_correctability(request: LensScoreTextRequest):
             "enabled": True,
         }
     except Exception as e:
-        logger.error(f"Lens correctability failed: {e}")
-        return {"correctability": 0.0, "energy": 0.0, "normalized": 0.5,
-                "error": str(e)}
+        return {
+            "correctability": 0.0,
+            "energy": 0.0,
+            "normalized": 0.5,
+            "error": _safe_detail(e, "lens correctability"),
+        }
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1312,8 +1315,10 @@ async def sandbox_analyze(request: SandboxAnalyzeRequest):
 
         return result
     except Exception as e:
-        logger.error(f"Sandbox analysis failed: {e}")
-        return {"error": str(e), "passed": False}
+        return {
+            "error": _safe_detail(e, "sandbox analysis"),
+            "passed": False,
+        }
 
 
 if __name__ == "__main__":

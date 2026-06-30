@@ -590,6 +590,8 @@ def _install_artifacts(m: model_registry.Model, models_dir: str,
                 with open(marker_path) as marker_file:
                     marker = marker_file.read().strip()
             except OSError:
+                # Missing/unreadable marker means the artifact is unverified
+                # and must be replaced; marker remains empty intentionally.
                 pass
             if (os.path.isfile(target_path) and not args.force_artifacts
                     and marker in (m.name, m.model_file)):

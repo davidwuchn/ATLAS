@@ -661,6 +661,8 @@ def _extract_training_embeddings(samples: List[Dict],
                     except (jsonlib.JSONDecodeError, KeyError, TypeError):
                         continue
         except OSError:
+            # A corrupt or unreadable cache only forfeits reuse; embeddings
+            # are recomputed and a fresh cache may be appended below.
             pass
 
     cache_fh = None
@@ -834,6 +836,8 @@ def _activate_lens_bundle(staging_dir: str, artifact_dir: str) -> None:
             try:
                 os.remove(path)
             except OSError:
+                # Rollback cleanup is best-effort; the original artifacts are
+                # restored from backup immediately afterward.
                 pass
         for filename in os.listdir(backup_dir):
             os.replace(os.path.join(backup_dir, filename),
@@ -1848,7 +1852,6 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
         return 1
 
     files_to_upload = ["cost_field.pt", "model_identity.json"]
-    norm_path = os.path.join(artifact_dir, "cx_normalization.json")
     files_to_upload.append("cx_normalization.json")
     # Pickle-free twin: include only when at least as fresh as the .pt —
     # an older safetensors is a previous model's weights.
@@ -1999,6 +2002,8 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
         from atlas.cli.commands.tier import classify, probe
         entry_tier = classify(probe()).tier
     except Exception:
+        # Host tier detection is optional publishing metadata; medium is the
+        # conservative registry fallback when hardware probing is unavailable.
         pass
     model_file = ""
     size_gb = 0.0
@@ -2010,6 +2015,8 @@ def _emit_publish(args: argparse.Namespace, color: bool) -> int:
         size_gb = round(os.path.getsize(
             os.path.join(base, model_file)) / (1024 ** 3), 1)
     except Exception:
+        # Model size enriches the registry entry but is not required to
+        # publish a verified artifact bundle.
         pass
 
     entry = _render_registry_entry(model_label, model_file or model_label,

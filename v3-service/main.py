@@ -21,7 +21,7 @@ import time
 import urllib.request
 import uuid
 import urllib.error
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Dict, List, Optional, Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -831,11 +831,13 @@ def _build_command_allowed(command: str) -> bool:
 def _project_relative_path(file_path: str, working_dir: str = "/workspace") -> str:
     if not file_path:
         raise ValueError("file_path is required for build verification")
-    path = Path(file_path)
+    path = PurePath(file_path)
+    root = PurePath(working_dir or "/workspace")
+    if not root.is_absolute() or ".." in root.parts:
+        raise ValueError(f"working_dir must be an absolute project root: {working_dir}")
     if path.is_absolute():
-        root = Path(working_dir or "/workspace").resolve(strict=False)
         try:
-            rel = path.resolve(strict=False).relative_to(root)
+            rel = path.relative_to(root)
         except ValueError as e:
             raise ValueError(f"file_path must be under working_dir: {file_path}") from e
     else:

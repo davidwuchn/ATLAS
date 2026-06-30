@@ -86,6 +86,8 @@ def _read_dotenv() -> Dict[str, str]:
                                 v = head
                             out[k.strip()] = v.strip().strip('"').strip("'")
             except OSError:
+                # An unreadable optional .env is treated as absent; doctor
+                # continues with process-environment values and diagnostics.
                 pass
             return out
         parent = os.path.dirname(cur)

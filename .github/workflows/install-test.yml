@@ -87,6 +87,9 @@ jobs:
               # build_atlas_tui — the parts that historically broke.
               ./scripts/atlas-bootstrap.sh
 
+              # Repeat the exact install to catch upgrade/idempotency failures.
+              ./scripts/atlas-bootstrap.sh
+
               # Verify the artifacts the bootstrap was supposed to leave.
               echo
               echo "=== Verifying bootstrap outputs ==="
@@ -118,6 +121,74 @@ jobs:
                 || { echo "::error::go not installed"; exit 1; }
               echo "✓ go installed: $(/usr/local/go/bin/go version 2>/dev/null || go version)"
 
+              # 6. PATH entries remain usable and are not duplicated on rerun.
+              bash -lc "command -v atlas >/dev/null" \
+                || { echo "::error::atlas not available in a login shell"; exit 1; }
+              [[ $(grep -Fc "/usr/local/go/bin" /root/.profile) -eq 1 ]] \
+                || { echo "::error::Go PATH entry duplicated in /root/.profile"; exit 1; }
+              echo "✓ repeat install is idempotent and login-shell PATH works"
+
               echo
               echo "=== ${{ matrix.distro.name }}: PASS ==="
+            '
+
+  bootstrap-sudo-user:
+    name: bootstrap via sudo for a regular user
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bootstrap as root with a non-root target owner
+        run: |
+          docker run --rm \
+            -v "$PWD":/atlas:ro \
+            -w /work \
+            -e ATLAS_BOOTSTRAP_SKIP_DOCKER=1 \
+            -e ATLAS_BOOTSTRAP_SKIP_NVIDIA=1 \
+            -e ATLAS_BOOTSTRAP_SKIP_MODELS=1 \
+            -e ATLAS_BOOTSTRAP_SKIP_COMPOSE=1 \
+            -e ATLAS_BOOTSTRAP_SKIP_SYSCTL=1 \
+            ubuntu:24.04 \
+            bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends \
+                curl ca-certificates git python3 python3-pip python3-venv \
+                sudo tar gnupg lsb-release pciutils >/dev/null
+
+              useradd --create-home --shell /bin/bash atlas-user
+              cp -rT /atlas /work
+              cd /work
+
+              export SUDO_USER=atlas-user
+              ./scripts/atlas-bootstrap.sh
+              ./scripts/atlas-bootstrap.sh
+
+              test "$(stat -c %U /work)" = atlas-user \
+                || { echo "::error::checkout is not owned by atlas-user"; exit 1; }
+              test -x /home/atlas-user/.local/bin/atlas \
+                || { echo "::error::atlas CLI was not installed for atlas-user"; exit 1; }
+              test -x /home/atlas-user/.local/bin/atlas-tui \
+                || { echo "::error::atlas-tui was not installed for atlas-user"; exit 1; }
+              sudo -H -u atlas-user bash -lc "command -v atlas >/dev/null && atlas --help >/dev/null" \
+                || { echo "::error::atlas is unavailable to atlas-user in a login shell"; exit 1; }
+              [[ $(grep -Fc "/usr/local/go/bin" /home/atlas-user/.profile) -eq 1 ]] \
+                || { echo "::error::Go PATH entry duplicated for atlas-user"; exit 1; }
+
+              # A missing core prerequisite must fail before the ready banner.
+              python_path=$(command -v python3)
+              mv "$python_path" "${python_path}.disabled"
+              set +e
+              ./scripts/atlas-bootstrap.sh >/tmp/atlas-missing-python.log 2>&1
+              missing_python_rc=$?
+              set -e
+              mv "${python_path}.disabled" "$python_path"
+              [[ $missing_python_rc -ne 0 ]] \
+                || { echo "::error::bootstrap succeeded without Python"; exit 1; }
+              ! grep -q "ATLAS is ready" /tmp/atlas-missing-python.log \
+                || { echo "::error::bootstrap printed ready after CLI failure"; exit 1; }
+
+              echo "=== sudo/non-root repeat install: PASS ==="
             '
