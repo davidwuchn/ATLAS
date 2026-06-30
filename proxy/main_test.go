@@ -70,6 +70,40 @@ func TestModelsPrefersLoadedModelOverStaleConfig(t *testing.T) {
 	}
 }
 
+func TestHealthAdvertisesRawDemoCapability(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	previousInference, previousLens, previousSandbox := inferenceURL, lensURL, sandboxURL
+	inferenceURL, lensURL, sandboxURL = upstream.URL, upstream.URL, upstream.URL
+	t.Cleanup(func() {
+		inferenceURL, lensURL, sandboxURL = previousInference, previousLens, previousSandbox
+	})
+
+	rec := httptest.NewRecorder()
+	newProxyMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var payload struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	found := false
+	for _, capability := range payload.Capabilities {
+		if capability == demoRawCapability {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("health capabilities = %v, want %q", payload.Capabilities, demoRawCapability)
+	}
+}
+
 func withInferenceURL(t *testing.T, url string) {
 	t.Helper()
 	previous := inferenceURL

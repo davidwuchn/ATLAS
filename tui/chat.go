@@ -1,10 +1,11 @@
-// PC-062: chat client — POSTs user messages to atlas-proxy /v1/agent
-// and consumes the SSE response stream.
+// PC-062: chat clients for the ATLAS agent stream and the demo's one-shot
+// raw OpenAI-compatible stream.
 //
 // Two SSE protocols flow into this TUI:
 //
 //   /events  — typed Envelope stream (consumer.go) — pipeline visibility
 //   /v1/agent — {type, data} chat stream (this file) — assistant reply
+//   /v1/chat/completions — standard OpenAI SSE used only by the raw demo pane
 //
 // The chat stream is request-scoped: each user message opens a fresh
 // SSE connection that closes when the agent loop returns [DONE]. This
@@ -37,21 +38,162 @@ type chatEvent struct {
 // proxy on each /v1/agent call. Field shape MUST match the historyMsg
 // struct in proxy/agent.go's handleAgent.
 type historyMessage struct {
-	Role    string `json:"role"`    // "user" or "assistant"
+	Role    string `json:"role"` // "user" or "assistant"
 	Content string `json:"content"`
 }
 
 // agentRequest is the POST body for /v1/agent. Field tags MUST match
 // the anonymous struct in proxy/agent.go's handleAgent.
 type agentRequest struct {
-	Message           string           `json:"message"`
-	WorkingDir        string           `json:"working_dir"`
-	Mode              string           `json:"mode"`       // "default" | "accept-edits" | "yolo"
-	SessionID         string           `json:"session_id"` // PC-062: required so /cancel can target this turn
-	History           []historyMessage `json:"history,omitempty"`
-	BypassV3          bool             `json:"bypass_v3,omitempty"`          // /demo baseline flag — proxy disables V3 orchestration
-	DisableFreshSlot  bool             `json:"disable_fresh_slot,omitempty"` // /demo flag — skip PC-045 so pre-warm survives
-	SandboxSubdir     string           `json:"sandbox_subdir,omitempty"`     // /demo flag — write files into this subdir of the workspace
+	Message          string           `json:"message"`
+	WorkingDir       string           `json:"working_dir"`
+	Mode             string           `json:"mode"`       // "default" | "accept-edits" | "yolo"
+	SessionID        string           `json:"session_id"` // PC-062: required so /cancel can target this turn
+	History          []historyMessage `json:"history,omitempty"`
+	DisableFreshSlot bool             `json:"disable_fresh_slot,omitempty"` // /demo flag — skip PC-045 so pre-warm survives
+	SandboxSubdir    string           `json:"sandbox_subdir,omitempty"`     // /demo flag — write files into this subdir of the workspace
+}
+
+type rawChatRequest struct {
+	Model              string              `json:"model"`
+	Messages           []map[string]string `json:"messages"`
+	Temperature        float64             `json:"temperature"`
+	MaxTokens          int                 `json:"max_tokens"`
+	Stream             bool                `json:"stream"`
+	StreamOptions      map[string]bool     `json:"stream_options"`
+	ChatTemplateKwargs map[string]bool     `json:"chat_template_kwargs"`
+}
+
+// sendRawChat makes one direct OpenAI-compatible model request. It never uses
+// /v1/agent, so the raw demo pane has no planner, tool loop, candidate search,
+// filesystem access, or other orchestration layer.
+func sendRawChat(ctx context.Context, proxyURL, modelID, message string,
+	out chan<- chatEvent) error {
+	if strings.TrimSpace(modelID) == "" {
+		modelID = "local-model"
+	}
+	promptTokens := len(message) / 4
+	out <- makeChatEvent("llm_call_start", map[string]int{"prompt_tokens": promptTokens})
+
+	body, err := json.Marshal(rawChatRequest{
+		Model:              modelID,
+		Messages:           []map[string]string{{"role": "user", "content": message}},
+		Temperature:        0.3,
+		MaxTokens:          8192,
+		Stream:             true,
+		StreamOptions:      map[string]bool{"include_usage": true},
+		ChatTemplateKwargs: map[string]bool{"enable_thinking": false},
+	})
+	if err != nil {
+		return fmt.Errorf("encode raw request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(proxyURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build raw request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if tok := loadBearerToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+
+	started := time.Now()
+	resp, err := (&http.Client{Transport: &http.Transport{
+		ResponseHeaderTimeout: 60 * time.Second,
+	}}).Do(req)
+	if err != nil {
+		return fmt.Errorf("raw model request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("raw model returned %d: %s", resp.StatusCode,
+			strings.TrimSpace(string(responseBody)))
+	}
+
+	var content strings.Builder
+	var reasoning strings.Builder
+	firstToken := true
+	totalTokens := 0
+	completionTokens := 0
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Usage struct {
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue
+		}
+		if chunk.Usage.TotalTokens > 0 {
+			totalTokens = chunk.Usage.TotalTokens
+			completionTokens = chunk.Usage.CompletionTokens
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		delta := chunk.Choices[0].Delta
+		if firstToken && (delta.Content != "" || delta.ReasoningContent != "") {
+			firstToken = false
+			out <- makeChatEvent("llm_first_token", map[string]int64{
+				"prompt_ms": time.Since(started).Milliseconds(),
+			})
+		}
+		if delta.ReasoningContent != "" {
+			reasoning.WriteString(delta.ReasoningContent)
+			out <- makeChatEvent("reasoning_token", map[string]string{"text": delta.ReasoningContent})
+		}
+		if delta.Content != "" {
+			content.WriteString(delta.Content)
+			out <- makeChatEvent("llm_token", map[string]string{"text": delta.Content})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read raw model stream: %w", err)
+	}
+	if content.Len() == 0 && reasoning.Len() > 0 {
+		content.WriteString(reasoning.String())
+	}
+	if completionTokens == 0 {
+		completionTokens = len(content.String()) / 4
+	}
+	if totalTokens == 0 {
+		totalTokens = promptTokens + completionTokens
+	}
+	out <- makeChatEvent("llm_call_end", map[string]interface{}{
+		"tokens":       totalTokens,
+		"total_tokens": totalTokens,
+		"chars":        content.Len(),
+		"ms":           time.Since(started).Milliseconds(),
+	})
+	if content.Len() > 0 {
+		out <- makeChatEvent("text", map[string]string{"content": content.String()})
+	}
+	return nil
+}
+
+func makeChatEvent(eventType string, payload interface{}) chatEvent {
+	data, _ := json.Marshal(payload)
+	return chatEvent{Type: eventType, Data: data}
 }
 
 // cancelTurn POSTs /cancel for a session_id. Best-effort: returns
@@ -175,14 +317,12 @@ func sendChat(ctx context.Context, proxyURL, message, workingDir, mode,
 // Held in a struct rather than added as positional args to keep
 // sendChatOpts readable as the demo grows.
 type demoOpts struct {
-	bypassV3         bool
 	disableFreshSlot bool
 	sandboxSubdir    string
 }
 
 // sendChatOpts is sendChat with the demo flags exposed; used by the
-// /demo split-pane to drive a base-agent session next to the V3 one
-// against the same proxy (bypassV3), keep PC-045 from wiping the
+// /demo split-pane's V3 side to keep PC-045 from wiping the
 // pre-warmed prefix cache (disableFreshSlot), and write files into
 // per-side sandbox subdirs so the two panes never clobber each other
 // (sandboxSubdir).
@@ -196,7 +336,6 @@ func sendChatOpts(ctx context.Context, proxyURL, message, workingDir, mode,
 		Mode:             mode,
 		SessionID:        sessionID,
 		History:          history,
-		BypassV3:         opts.bypassV3,
 		DisableFreshSlot: opts.disableFreshSlot,
 		SandboxSubdir:    opts.sandboxSubdir,
 	})

@@ -1,15 +1,14 @@
-// Demo mode — split-pane recording subprogram. Two concurrent
-// /v1/agent sessions against the same atlas-proxy: the left pane is the
-// base file/tool agent with V3 disabled, while the right pane adds V3.
-// Same configured model, two llama-server slots, side-by-side.
+// Demo mode — split-pane recording subprogram. Two concurrent requests
+// against the same configured model: the left pane is one direct raw chat
+// completion, while the right pane enters the ATLAS V3 agent.
 //
 // Implementation note: each pane uses a real `tuiModel` as its chat
 // state holder. We forward every chatEvent into that model's
 // appendChatEvent, then call renderChatPane to draw. That way the
 // V3 pane formats EXACTLY like a normal atlas-tui session — every
 // tool call, V3 stage, token stream, lens score row — with no
-// reimplementation. The baseline pane gets the same machinery so its
-// tool-call and reasoning-token rendering look polished too.
+// reimplementation. The raw pane translates standard OpenAI SSE deltas into
+// the same rendering events, without entering the agent or tool protocols.
 //
 // Reliability without scripting: prompt comes from a curated bank in
 // docs/demo/demo_prompts.json — each entry is hand-validated to expose
@@ -86,15 +85,13 @@ type demoModel struct {
 	workingDir string
 	length     string // "short" (30s) | "medium" (60s) | "long" (3-5m)
 	prompt     demoPrompt
+	modelID    string // exact identifier returned by /v1/models
 	modelLabel string // resolved from the proxy's OpenAI-compatible model list
 
-	// Per-side sandbox subdirectories under workingDir, created at
-	// startup and passed to the proxy as `sandbox_subdir`. Each side
-	// writes only inside its own sandbox so AST-edits, write_file, and
-	// V3 candidate selection on the V3 side don't collide with the raw
-	// side's output (and vice-versa). Kept after exit per the "review
-	// what each side produced" workflow.
-	rawSandbox string // e.g. ".demo-raw-1715562342"
+	// The V3 side writes into an isolated sandbox under workingDir. The raw
+	// side has no filesystem tools; its one model response is retained in the
+	// left pane during output review.
+	rawSandbox string // empty workspace retained for backward-compatible review state
 	v3Sandbox  string
 
 	width, height int
@@ -121,7 +118,7 @@ type demoModel struct {
 
 	// Prompt type-out: chars revealed left of the user-input line at the
 	// top of the screen. While typing, streams haven't fired yet — the
-	// real /v1/agent requests go out the moment typing completes, not
+	// real raw-model and /v1/agent requests go out when typing completes, not
 	// on Init, so the viewer sees prompt → reaction in the right order.
 	promptShown  int
 	streamsFired bool
@@ -251,12 +248,14 @@ func newDemoModel(proxyURL, workingDir, length string) (*demoModel, error) {
 		}
 	}
 
+	modelID, modelLabel := fetchDemoModelIdentity(proxyURL)
 	return &demoModel{
 		proxyURL:   proxyURL,
 		workingDir: workingDir,
 		length:     length,
 		prompt:     p,
-		modelLabel: fetchDemoModelLabel(proxyURL),
+		modelID:    modelID,
+		modelLabel: modelLabel,
 		events:     make(chan demoEvent, 1024),
 		ctx:        ctx,
 		cancel:     cancel,
@@ -269,27 +268,28 @@ func newDemoModel(proxyURL, workingDir, length string) (*demoModel, error) {
 }
 
 const demoModelFallback = "MODEL"
+const demoRawCapability = "demo_raw_completion_v1"
 
 // fetchDemoModelLabel resolves the model actually configured in the proxy.
 // Metadata is presentation-only: if the endpoint is unavailable or malformed,
 // the demo still launches with a neutral label instead of guessing a family or
 // parameter count.
-func fetchDemoModelLabel(proxyURL string) string {
+func fetchDemoModelIdentity(proxyURL string) (string, string) {
 	req, err := http.NewRequest(http.MethodGet,
 		strings.TrimRight(proxyURL, "/")+"/v1/models", nil)
 	if err != nil {
-		return demoModelFallback
+		return "", demoModelFallback
 	}
 	if tok := loadBearerToken(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
 	if err != nil {
-		return demoModelFallback
+		return "", demoModelFallback
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return demoModelFallback
+		return "", demoModelFallback
 	}
 	var payload struct {
 		Data []struct {
@@ -297,9 +297,48 @@ func fetchDemoModelLabel(proxyURL string) string {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || len(payload.Data) == 0 {
-		return demoModelFallback
+		return "", demoModelFallback
 	}
-	return formatDemoModelLabel(payload.Data[0].ID)
+	id := strings.TrimSpace(payload.Data[0].ID)
+	return id, formatDemoModelLabel(id)
+}
+
+func fetchDemoModelLabel(proxyURL string) string {
+	_, label := fetchDemoModelIdentity(proxyURL)
+	return label
+}
+
+// proxySupportsRawDemo prevents a new TUI from silently talking to a proxy
+// whose demo contract predates the direct raw-completion comparison.
+func proxySupportsRawDemo(proxyURL string) bool {
+	req, err := http.NewRequest(http.MethodGet,
+		strings.TrimRight(proxyURL, "/")+"/health", nil)
+	if err != nil {
+		return false
+	}
+	if tok := loadBearerToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var payload struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return false
+	}
+	for _, capability := range payload.Capabilities {
+		if capability == demoRawCapability {
+			return true
+		}
+	}
+	return false
 }
 
 // formatDemoModelLabel turns a registry identifier such as
@@ -353,8 +392,8 @@ func (m *demoModel) displayModelLabel() string {
 	return m.modelLabel
 }
 
-func (m *demoModel) baselineTitle() string {
-	return m.displayModelLabel() + "  ·  BASE AGENT  ·  V3 OFF"
+func (m *demoModel) rawTitle() string {
+	return m.displayModelLabel() + "  ·  RAW MODEL  ·  NO ORCHESTRATION"
 }
 
 func (m *demoModel) atlasTitle() string {
@@ -374,19 +413,20 @@ func (m *demoModel) Init() tea.Cmd {
 	)
 }
 
-// startStreams fires both /v1/agent POSTs in parallel. They share the
-// same proxy (same llama-server, two slots) but differ on bypass_v3.
-// disable_fresh_slot=true on both so PC-045 doesn't wipe the prefix
-// cache between the model's keep-warm pings and the demo run.
+// startStreams fires a direct raw model request and an ATLAS agent request in
+// parallel. They share the same proxy and configured model, but only the V3
+// side enters /v1/agent.
+// disable_fresh_slot=true on the V3 request so PC-045 doesn't wipe its prefix
+// cache. The raw request bypasses the agent slot-reset path entirely.
 func (m *demoModel) startStreams() tea.Cmd {
 	return func() tea.Msg {
-		go m.runStream("raw", true)
-		go m.runStream("v3", false)
+		go m.runStream("raw")
+		go m.runStream("v3")
 		return nil
 	}
 }
 
-func (m *demoModel) runStream(side string, bypassV3 bool) {
+func (m *demoModel) runStream(side string) {
 	out := make(chan chatEvent, 128)
 	go func() {
 		for evt := range out {
@@ -398,12 +438,16 @@ func (m *demoModel) runStream(side string, bypassV3 bool) {
 	if side == "v3" {
 		sandbox = m.v3Sandbox
 	}
-	err := sendChatOpts(m.ctx, m.proxyURL, m.prompt.Prompt, m.workingDir,
-		"yolo", sid, nil, demoOpts{
-			bypassV3:         bypassV3,
-			disableFreshSlot: true,
-			sandboxSubdir:    sandbox,
-		}, out)
+	var err error
+	if side == "raw" {
+		err = sendRawChat(m.ctx, m.proxyURL, m.modelID, m.prompt.Prompt, out)
+	} else {
+		err = sendChatOpts(m.ctx, m.proxyURL, m.prompt.Prompt, m.workingDir,
+			"yolo", sid, nil, demoOpts{
+				disableFreshSlot: true,
+				sandboxSubdir:    sandbox,
+			}, out)
+	}
 	close(out)
 	m.events <- demoEvent{done: &demoStreamDone{side: side, err: err}}
 }
@@ -498,7 +542,18 @@ func (m *demoModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if s.side == "raw" {
-				m.rawChild.appendChatEvent(s.evt)
+				if s.evt.Type == "text" {
+					var payload struct {
+						Content string `json:"content"`
+					}
+					if json.Unmarshal(s.evt.Data, &payload) == nil && payload.Content != "" {
+						m.rawChild.chat = append(m.rawChild.chat, chatMessage{
+							Role: roleAssistant, Meta: "raw model", Body: payload.Content,
+						})
+					}
+				} else {
+					m.rawChild.appendChatEvent(s.evt)
+				}
 			} else {
 				m.v3Child.appendChatEvent(s.evt)
 			}
@@ -622,7 +677,7 @@ func (m *demoModel) View() string {
 		footer = demoStatusStyle.Render(
 			"output review  ·  tab: switch side  ·  n/p (or ←/→): cycle file  ·  1-9: jump  ·  q: quit  ·  active: " + m.activePane)
 	} else {
-		rawTitle := demoRawTitleStyle.Render(m.baselineTitle()) + "  " +
+		rawTitle := demoRawTitleStyle.Render(m.rawTitle()) + "  " +
 			demoStatusStyle.Render(streamStatus(m.rawChild, m.rawDone, m.rawEverStreamed, m.rawErr))
 		v3Title := demoV3TitleStyle.Render(m.atlasTitle()) + "  " +
 			demoStatusStyle.Render(streamStatus(m.v3Child, m.v3Done, m.v3EverStreamed, m.v3Err))
@@ -813,7 +868,7 @@ func (m *demoModel) renderOutputPane(side string, w, h int) string {
 		sandbox = m.rawSandbox
 		files = m.rawFiles
 		selected = m.rawSelectedIdx
-		title = m.baselineTitle() + "  ·  " + sandbox
+		title = m.rawTitle() + "  ·  " + sandbox
 		titleStyle = demoRawTitleStyle
 	} else {
 		sandbox = m.v3Sandbox
@@ -821,6 +876,13 @@ func (m *demoModel) renderOutputPane(side string, w, h int) string {
 		selected = m.v3SelectedIdx
 		title = m.atlasTitle() + "  ·  " + sandbox
 		titleStyle = demoV3TitleStyle
+	}
+	if side == "raw" && len(files) == 0 {
+		chat, _, _, _, _, _ := renderChatPane(
+			m.rawChild.chat, m.rawChild.chatRenderer, h-3, w-4, 0,
+		)
+		body := titleStyle.Render(m.rawTitle()+"  ·  RESPONSE") + "\n\n" + chat
+		return demoPaneStyle.Width(w).Height(h).Render(body)
 	}
 
 	// File list. Trim if too tall — the body needs space too.
@@ -910,6 +972,12 @@ func readFileForDisplay(path string, maxLines, maxCols int) string {
 // Called from main.go after the primary TUI exits with launchDemoMode
 // set, or from a `--demo` flag on cold start.
 func runDemo(proxyURL, workingDir, length string) error {
+	if !proxySupportsRawDemo(proxyURL) {
+		return fmt.Errorf(
+			"active atlas-proxy is too old for an honest split demo; " +
+				"restart ATLAS from the current checkout so the proxy is rebuilt",
+		)
+	}
 	model, err := newDemoModel(proxyURL, workingDir, length)
 	if err != nil {
 		return err

@@ -110,6 +110,48 @@ func TestSendChatPostsRequestBodyAndStreamsEvents(t *testing.T) {
 	}
 }
 
+func TestDemoRawSideUsesOneDirectModelRequest(t *testing.T) {
+	var got rawChatRequest
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	out := make(chan chatEvent, 8)
+
+	if err := sendRawChat(context.Background(), srv.URL, "configured-model", "build it", out); err != nil {
+		t.Fatalf("sendRawChat: %v", err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want raw chat completions endpoint", gotPath)
+	}
+	if !got.Stream || got.Model != "configured-model" {
+		t.Fatalf("request = %#v", got)
+	}
+	if len(got.Messages) != 1 || got.Messages[0]["content"] != "build it" {
+		t.Fatalf("messages = %#v", got.Messages)
+	}
+	for _, message := range got.Messages {
+		if strings.Contains(message["content"], "plan_tasks") {
+			t.Fatalf("raw request contains orchestration tool guidance: %#v", got.Messages)
+		}
+	}
+	close(out)
+	var types []string
+	for event := range out {
+		types = append(types, event.Type)
+	}
+	if strings.Join(types, ",") != "llm_call_start,llm_first_token,llm_token,llm_call_end,text" {
+		t.Fatalf("events = %v", types)
+	}
+}
+
 func TestSendChatHandlesNon200Status(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "no llama", 503)

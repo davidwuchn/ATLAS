@@ -40,6 +40,7 @@ var (
 )
 
 const (
+	demoRawCapability   = "demo_raw_completion_v1"
 	maxRepairAttempts   = 3
 	gxLowThreshold      = 0.5 // below this → trigger best-of-K
 	gxHighThreshold     = 0.9 // above this → early exit from best-of-K
@@ -200,12 +201,13 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := map[string]any{
-		"status":     overallStatus,
-		"inference":  llmOK,
-		"lens":       ragOK,
-		"lens_ready": lensReady,
-		"sandbox":    sandboxOK,
-		"port":       proxyPort,
+		"status":       overallStatus,
+		"inference":    llmOK,
+		"lens":         ragOK,
+		"lens_ready":   lensReady,
+		"sandbox":      sandboxOK,
+		"port":         proxyPort,
+		"capabilities": []string{demoRawCapability},
 		"stats": map[string]int64{
 			"requests":       totalRequests.Load(),
 			"repairs":        totalRepairs.Load(),

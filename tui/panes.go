@@ -360,7 +360,11 @@ func renderChatMessage(m chatMessage, renderer *glamour.TermRenderer,
 		return prependPrefix(header, body)
 
 	case roleAssistant:
-		header := chatAssistantStyle.Bold(true).Render("agent")
+		label := m.Meta
+		if label == "" {
+			label = "agent"
+		}
+		header := chatAssistantStyle.Bold(true).Render(label)
 		body := renderMarkdown(m.Body, renderer)
 		return prependPrefix(header, body)
 

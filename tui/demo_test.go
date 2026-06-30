@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -54,9 +56,97 @@ func TestFetchDemoModelLabel(t *testing.T) {
 	}
 }
 
+func TestProxySupportsRawDemoRequiresCapability(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"current proxy", `{"capabilities":["demo_raw_completion_v1"]}`, true},
+		{"old proxy", `{"status":"ok"}`, false},
+		{"malformed", `{`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/health" {
+					t.Fatalf("path = %q, want /health", r.URL.Path)
+				}
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			if got := proxySupportsRawDemo(srv.URL); got != tc.want {
+				t.Fatalf("proxySupportsRawDemo = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunDemoRejectsOldProxyBeforeLaunching(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	err := runDemo(srv.URL, t.TempDir(), "short")
+	if err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Fatalf("runDemo error = %v, want stale-proxy rejection", err)
+	}
+}
+
+func TestDemoRawStreamNeverEntersAgentEndpoint(t *testing.T) {
+	rawCalls, agentCalls := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			rawCalls++
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"raw answer\"}}]}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		case "/v1/agent":
+			agentCalls++
+			http.Error(w, "raw side entered agent", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	m := &demoModel{
+		proxyURL: srv.URL,
+		modelID:  "configured-model",
+		prompt:   demoPrompt{Prompt: "build it"},
+		events:   make(chan demoEvent, 16),
+		ctx:      context.Background(),
+	}
+	m.runStream("raw")
+	if rawCalls != 1 || agentCalls != 0 {
+		t.Fatalf("raw calls = %d, agent calls = %d", rawCalls, agentCalls)
+	}
+}
+
+func TestDemoLabelsRawCompletionAsModelNotAgent(t *testing.T) {
+	rawChild := newTUIModel("http://unused")
+	v3Child := newTUIModel("http://unused")
+	payload, _ := json.Marshal(map[string]string{"content": "raw answer"})
+	m := &demoModel{
+		rawChild: &rawChild,
+		v3Child:  &v3Child,
+		events:   make(chan demoEvent, 1),
+		ctx:      context.Background(),
+	}
+	_, _ = m.Update(demoBatchMsg{stream: []demoStreamMsg{{
+		side: "raw",
+		evt:  chatEvent{Type: "text", Data: payload},
+	}}})
+	if len(m.rawChild.chat) != 1 || m.rawChild.chat[0].Meta != "raw model" {
+		t.Fatalf("raw chat rows = %#v", m.rawChild.chat)
+	}
+}
+
 func TestDemoTitlesDescribeActualComparison(t *testing.T) {
 	m := &demoModel{modelLabel: "Orion code 10B"}
-	left := m.baselineTitle()
+	left := m.rawTitle()
 	right := m.atlasTitle()
 	for _, title := range []string{left, right} {
 		if !strings.Contains(title, "Orion code 10B") {
@@ -66,7 +156,7 @@ func TestDemoTitlesDescribeActualComparison(t *testing.T) {
 			t.Fatalf("title retains misleading legacy wording: %q", title)
 		}
 	}
-	if !strings.Contains(left, "BASE AGENT") || !strings.Contains(left, "V3 OFF") {
+	if !strings.Contains(left, "RAW MODEL") || !strings.Contains(left, "NO ORCHESTRATION") {
 		t.Fatalf("baseline title is not explicit about comparison: %q", left)
 	}
 	if !strings.Contains(right, "ATLAS V3") {
@@ -76,7 +166,7 @@ func TestDemoTitlesDescribeActualComparison(t *testing.T) {
 
 func TestDemoTitleFallsBackWithoutMetadata(t *testing.T) {
 	m := &demoModel{}
-	if got := m.baselineTitle(); !strings.HasPrefix(got, demoModelFallback) {
+	if got := m.rawTitle(); !strings.HasPrefix(got, demoModelFallback) {
 		t.Fatalf("baseline title = %q, want neutral fallback", got)
 	}
 }
@@ -99,7 +189,7 @@ func TestDemoLiveAndOutputViewsUseResolvedTitles(t *testing.T) {
 
 	assertTitles := func(name, view string) {
 		t.Helper()
-		for _, want := range []string{"Orion code 10B", "BASE AGENT", "V3 OFF", "ATLAS V3"} {
+		for _, want := range []string{"Orion code 10B", "RAW MODEL", "NO ORCHESTRATION", "ATLAS V3"} {
 			if !strings.Contains(view, want) {
 				t.Fatalf("%s view missing %q", name, want)
 			}
@@ -113,7 +203,16 @@ func TestDemoLiveAndOutputViewsUseResolvedTitles(t *testing.T) {
 
 	assertTitles("live", m.View())
 	m.outputMode = true
+	m.rawChild.chat = append(m.rawChild.chat, chatMessage{
+		Role: roleAssistant, Meta: "raw model", Body: "raw response survives",
+	})
 	assertTitles("output", m.View())
+	if output := m.View(); !strings.Contains(output, "raw response") || !strings.Contains(output, "survives") {
+		t.Fatal("output view discarded the raw model response")
+	}
+	if output := m.View(); !strings.Contains(output, "raw model") {
+		t.Fatal("raw response is still labeled as an agent response")
+	}
 }
 
 func TestDemoPromptStatusDoesNotInventZeroPercentProgress(t *testing.T) {

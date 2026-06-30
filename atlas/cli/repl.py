@@ -13,10 +13,12 @@ import subprocess
 import time
 import signal
 import atexit
+import json
 from typing import Optional, List
 
 from atlas.cli import client, compose as compose_config, display
 from atlas.cli.commands import solve, status, bench
+from atlas.cli.runtime_artifacts import go_binary_is_current
 
 
 PROXY_PORT = os.environ.get("ATLAS_PROXY_PORT", "8090")
@@ -26,6 +28,7 @@ LENS_URL = os.environ.get("ATLAS_LENS_URL", "http://localhost:8099")
 SANDBOX_URL = os.environ.get("ATLAS_SANDBOX_URL", "http://localhost:30820")
 V3_URL = os.environ.get("ATLAS_V3_URL", "http://localhost:8070")
 MODEL_NAME = os.environ.get("ATLAS_MODEL_NAME", "local-model")
+DEMO_RAW_CAPABILITY = "demo_raw_completion_v1"
 
 _proxy_process = None
 
@@ -39,6 +42,29 @@ def _check_url(url: str, timeout: int = 3) -> bool:
             return resp.status == 200
     except Exception:
         return False
+
+
+def _proxy_capabilities(url: Optional[str] = None, timeout: int = 3) -> set[str]:
+    """Read the active proxy capability contract from its health response."""
+    import urllib.request
+
+    base_url = (url or PROXY_URL).rstrip("/")
+    try:
+        req = urllib.request.Request(f"{base_url}/health")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return set()
+            payload = json.loads(resp.read(1 << 20))
+    except (OSError, ValueError, TypeError):
+        return set()
+    capabilities = payload.get("capabilities", []) if isinstance(payload, dict) else []
+    if not isinstance(capabilities, list):
+        return set()
+    return {item for item in capabilities if isinstance(item, str)}
+
+
+def _proxy_supports_capability(capability: str, url: Optional[str] = None) -> bool:
+    return capability in _proxy_capabilities(url)
 
 
 def _find_go() -> Optional[str]:
@@ -108,6 +134,17 @@ def _build_proxy(atlas_dir: str) -> Optional[str]:
     except Exception as e:
         print(f"  Build failed: {e}")
         return None
+
+
+def _select_proxy_binary(atlas_dir: str) -> Optional[str]:
+    """Select or rebuild the local proxy for the current checkout."""
+    binary = _find_proxy_binary(atlas_dir)
+    source_dir = os.path.join(atlas_dir, "proxy") if atlas_dir else ""
+    if binary and go_binary_is_current(binary, source_dir):
+        return binary
+    if binary:
+        print("  atlas-proxy source changed; rebuilding the installed binary...")
+    return _build_proxy(atlas_dir) if _find_go() else None
 
 
 def _kill_stale_proxy() -> None:
@@ -368,6 +405,64 @@ def _recreate_docker_proxy(atlas_dir: str, project_dir: str) -> bool:
         return False
 
 
+def _rebuild_docker_proxy_for_capability(
+    atlas_dir: str,
+    project_dir: str,
+    capability: str,
+) -> bool:
+    """Build and recreate atlas-proxy from checkout source, then verify it."""
+    if not atlas_dir:
+        return False
+    print("  Active atlas-proxy predates the raw demo contract; rebuilding it...")
+    env = os.environ.copy()
+    env["ATLAS_PROJECT_DIR"] = project_dir
+    try:
+        result = subprocess.run(
+            compose_config.command(atlas_dir, [
+                "up", "-d", "--build", "--no-deps", "--force-recreate",
+                "atlas-proxy",
+            ]),
+            cwd=atlas_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout)[-500:]
+            print(f"  Proxy rebuild failed: {tail}")
+            return False
+        deadline = time.time() + 60.0
+        while time.time() < deadline:
+            if _proxy_supports_capability(capability):
+                print("  Proxy rebuilt with the current demo contract")
+                return True
+            time.sleep(1.0)
+        print("  Rebuilt proxy never advertised the required demo capability")
+        return False
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"  Proxy rebuild failed: {e}")
+        return False
+
+
+def _repair_proxy_capability(atlas_dir: str, capability: str) -> bool:
+    """Replace a reachable but stale proxy with one from this checkout."""
+    if _proxy_supports_capability(capability):
+        return True
+    if _docker_compose_owns_proxy(atlas_dir):
+        return _rebuild_docker_proxy_for_capability(atlas_dir, os.getcwd(), capability)
+    if not _find_go():
+        print(
+            "  Active atlas-proxy is too old for /demo and Go is unavailable "
+            "to rebuild it."
+        )
+        return False
+    proxy_bin = _build_proxy(atlas_dir)
+    if not proxy_bin or not _launch_local_proxy(proxy_bin):
+        return False
+    return _proxy_supports_capability(capability)
+
+
 def _align_workspace(atlas_dir: str) -> None:
     """If the proxy is running in Docker and its /workspace bind doesn't
     cover the current working directory, recreate it so it does. See PC-038.
@@ -446,7 +541,7 @@ def _wait_for_proxy(timeout: float = 60.0) -> bool:
     return False
 
 
-def _ensure_proxy() -> bool:
+def _ensure_proxy(required_capability: Optional[str] = None) -> bool:
     """Ensure atlas-proxy is running, launching it locally if needed.
 
     Strategy:
@@ -460,12 +555,16 @@ def _ensure_proxy() -> bool:
        locally from CWD
     4. Nothing available → return False
     """
+    atlas_dir = _find_atlas_dir()
+
     # Already running?
     if _check_url(PROXY_URL):
-        _align_workspace(_find_atlas_dir())
+        if required_capability and not _repair_proxy_capability(
+            atlas_dir, required_capability
+        ):
+            return False
+        _align_workspace(atlas_dir)
         return True
-
-    atlas_dir = _find_atlas_dir()
 
     # #118: macOS hybrid + Linux + CUDA/ROCm all run atlas-proxy in
     # docker. If the user's compose stack defines it, the stack owns
@@ -476,6 +575,10 @@ def _ensure_proxy() -> bool:
         print("  Docker compose stack owns atlas-proxy. Waiting for it to come up...")
         if _wait_for_proxy(timeout=60):
             print(f"  Proxy responded on port {PROXY_PORT}")
+            if required_capability and not _repair_proxy_capability(
+                atlas_dir, required_capability
+            ):
+                return False
             _align_workspace(atlas_dir)
             return True
         # Still nothing after 60s — the stack probably isn't running.
@@ -488,14 +591,16 @@ def _ensure_proxy() -> bool:
         return False
 
     # Try to find or build and launch locally (dev workflow, no docker).
-    proxy_bin = _find_proxy_binary(atlas_dir)
-
-    if not proxy_bin and _find_go():
-        proxy_bin = _build_proxy(atlas_dir)
+    proxy_bin = _select_proxy_binary(atlas_dir)
 
     if proxy_bin:
         print(f"  Starting local proxy ({os.path.basename(proxy_bin)})...")
         if _launch_local_proxy(proxy_bin):
+            if required_capability and not _proxy_supports_capability(
+                required_capability
+            ):
+                print("  Local proxy started without the required demo capability")
+                return False
             print(f"  Proxy ready on port {PROXY_PORT}")
             return True
 
